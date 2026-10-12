@@ -154,5 +154,16 @@ class EdgeRefusedTests(unittest.TestCase):
             self.assertIsNone(core.edge_proxy())
 
 
+class NoteLineTests(unittest.TestCase):
+    """A line that is only a note in brackets was read out by the voice (2026-10-12, 13 lines in 5 videos)."""
+
+    def test_note_only_lines_are_found_and_real_lines_are_not(self):
+        for text in ("(ရှေ့စာကြောင်း၏ အဆက်)", "(Contextual merge handled above)", "이거은 보전이 아니야?"):
+            self.assertTrue(rp._note_text(text), text)
+        for text in ("ဂူ (Gu) က ပြန်လာတယ်။", "သူ အိမ်ပြန်လာတယ်။"):
+            self.assertFalse(rp._note_text(text), text)
+        self.assertTrue(ne.narration_problems("(ရှေ့စာကြောင်း၏ အဆက်)"))
+
+
 if __name__ == "__main__":
     unittest.main()

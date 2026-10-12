@@ -392,8 +392,11 @@ _NOTE_RE = re.compile(r"(?i)\b(?:context\s+carried|continu(?:ing|ed|es)\s+(?:fro
 
 
 def _note_text(text: Any) -> bool:
-    """A translator's note (about IDs / context) instead of narration."""
-    return bool(_NOTE_RE.search(str(text or "")))
+    """A translator's note (about IDs / context) instead of narration; also a line with no Burmese word outside ( )
+    such as "(ရှေ့စာကြောင်း၏ အဆက်)" ("continuation of the previous sentence"), which the voice would read out."""
+    value = str(text or "")
+    bare = re.sub(r"\([^()]*\)", "", value)
+    return bool(_NOTE_RE.search(value)) or not re.search(r"[\u1000-\u109F]", bare)
 
 
 def _repeat_words(text: Any) -> list[str]:
@@ -1226,7 +1229,9 @@ CRITICAL OUTPUT ID PROTOCOL:
                                     "in Burmese script — translate titles and terms, write names by sound")
                 if notes:
                     problems.append("a note instead of narration (" + ", ".join(notes) + "): write the narration of "
-                                    "that ID's own source words, never a remark about IDs or context")
+                                    "that ID's own source words - even when the source is only the end of a sentence, "
+                                    "say those words; never a remark such as '(continuation of the previous sentence)' "
+                                    "and nothing only inside brackets")
                 if repeats:
                     problems.append("the same words twice (" + ", ".join(f"ID {b:05d} repeats the end of ID {a:05d}"
                                                                          for a, b in repeats) + "): a sentence split "
