@@ -4,6 +4,7 @@ import gc
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import difflib
@@ -11,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
@@ -360,6 +362,126 @@ def _drop_foreign_letters(items: list[dict[str, Any]], log: LogFn) -> list[dict[
             item = {**item, "translation": text}
         out.append(item)
     return out
+
+
+# Burmese narration is read by a Burmese voice, so every word is in Burmese script (2026-10-12): English words
+# left in the Burmese are read in an English accent, and a line mostly in English can come back from Edge TTS
+# with no audio, which stopped the render.
+_LATIN_WORD_RE = re.compile(r"[A-Za-z][A-Za-z'\u2019-]*[A-Za-z]")
+
+
+def _latin_words(text: Any) -> list[str]:
+    """English (Latin) words of 2+ letters outside ( ) in the Burmese narration."""
+    bare = re.sub(r"\([^()]*\)", "", str(text or ""))
+    return list(dict.fromkeys(_LATIN_WORD_RE.findall(bare)))
+
+
+# A sentence split across two IDs was translated whole in the first one and then said again, or every ID after
+# it said the NEXT ID's words (2026-10-12; 10-50 lines per video in the full tool). Each check re-asks the batch.
+_NOTE_RE = re.compile(r"(?i)\b(?:context\s+carried|continu(?:ing|ed|es)\s+(?:from\s+)?id|carried\s+by\s+id|"
+                      r"(?:previous|next|same)\s+id|id\s*\d{2,})\b")
+
+
+def _note_text(text: Any) -> bool:
+    """A translator's note (about IDs / context) instead of narration."""
+    return bool(_NOTE_RE.search(str(text or "")))
+
+
+def _repeat_words(text: Any) -> list[str]:
+    return [w for w in re.split(r"[\s၊။\"'“”‘’,.!?()\-–:]+", str(text or "")) if w]
+
+
+def _repeated_tail_share(left: Any, right: Any) -> float:
+    """How much of `right` the end of `left` already says (0-1). Spaced text (Burmese, English): by words,
+    right needs 3+ words. Text with few spaces (Thai): by the longest shared run of letters, 10+ letters."""
+    lw, rw = _repeat_words(left), _repeat_words(right)
+    r_letters = re.sub(r"\s+", "", str(right or ""))
+    if rw and len(r_letters) / len(rw) > 12:          # Thai-like: words are not split by spaces
+        if len(r_letters) < 10:
+            return 0.0
+        tail = re.sub(r"\s+", "", str(left or ""))[-(len(r_letters) + 15):]
+        match = difflib.SequenceMatcher(None, tail, r_letters, autojunk=False).find_longest_match(
+            0, len(tail), 0, len(r_letters))
+        return match.size / len(r_letters) if match.size >= 10 else 0.0
+    if len(rw) < 3:
+        return 0.0
+    tail = set(lw[-(len(rw) + 3):])
+    return sum(1 for w in rw if w in tail) / len(rw)
+
+
+def find_repeated_next_lines(items: list[dict[str, Any]],
+                             previous_context: list[dict[str, Any]] | None = None) -> list[tuple[int, int]]:
+    """(left id, right id) where the end of the left translation already says the right one, although the
+    sources do not repeat (a real repetition in the source is kept)."""
+    sequence = list(previous_context[-1:] if previous_context else []) + list(items)
+    found = []
+    for left, right in zip(sequence, sequence[1:]):
+        if (_repeated_tail_share(left.get("translation"), right.get("translation")) >= 0.6
+                and _repeated_tail_share(left.get("source_text"), right.get("source_text")) < 0.5):
+            found.append((int(left["id"]), int(right["id"])))
+    return found
+
+
+_DUP_STRIP_RE = re.compile(r"[\s၊။\"'“”‘’,.!?()\-–:—…]+")
+
+
+def _char_grams(text: Any, n: int = 3) -> set[str]:
+    value = _DUP_STRIP_RE.sub("", str(text or ""))
+    return {value[i:i + n] for i in range(len(value) - n + 1)}
+
+
+def find_near_duplicates(items: list[dict[str, Any]], previous_context: list[dict[str, Any]] | None = None, *,
+                         span: int = 2, min_share: float = 0.6) -> list[tuple[int, int]]:
+    """(a, b): lines at most `span` IDs apart whose translations say much the same while their sources do not."""
+    prev = list(previous_context[-span:]) if previous_context else []
+    seq = prev + list(items)
+    found: list[tuple[int, int]] = []
+    for i in range(len(seq)):
+        ga = _char_grams(seq[i].get("translation"))
+        if len(ga) < 12:
+            continue
+        for k in range(1, span + 1):
+            j = i + k
+            if j >= len(seq) or j < len(prev):
+                continue
+            gb = _char_grams(seq[j].get("translation"))
+            if len(gb) < 12 or len(ga & gb) / min(len(ga), len(gb)) < min_share:
+                continue
+            sa, sb = _char_grams(seq[i].get("source_text")), _char_grams(seq[j].get("source_text"))
+            if sa and sb and len(sa & sb) / min(len(sa), len(sb)) >= 0.5:
+                continue
+            found.append((int(seq[i]["id"]), int(seq[j]["id"])))
+    return found
+
+
+def _letter_count(text: Any) -> int:
+    """Letters and digits, vowel signs left out: close to a syllable count in Burmese, Hindi and Thai alike
+    (counting the signs too missed 2 of 8 slides read by hand)."""
+    return max(1, sum(1 for ch in str(text or "") if unicodedata.category(ch)[0] in "LN"))
+
+
+def _slid_runs(items: list[dict[str, Any]], next_source: Any = None, *, min_run: int = 4,
+               min_items: int = 8) -> list[tuple[int, int]]:
+    """(first ID, last ID) of runs whose translations carry the next ID's source line."""
+    if len(items) < min_items:
+        return []
+    src = [_letter_count(x.get("source_text")) for x in items]
+    src.append(_letter_count(next_source) if _clean(next_source) else 0)
+    tr = [_letter_count(x.get("translation")) for x in items]
+    ratios = sorted(t / s for t, s in zip(tr, src))
+    ratio = ratios[len(ratios) // 2]
+    own = [abs(math.log(t / (ratio * s))) for t, s in zip(tr, src)]
+    nxt = [abs(math.log(t / (ratio * src[i + 1]))) if src[i + 1] else float("inf") for i, t in enumerate(tr)]
+    runs: list[tuple[int, int]] = []
+    i = 0
+    while i < len(items):
+        j = i
+        while j < len(items) and nxt[j] < own[j]:
+            j += 1
+        if j - i >= min_run and sum(nxt[i:j]) < 0.45 * sum(own[i:j]) and sum(own[i:j]) / (j - i) > 0.3:
+            runs.append((int(items[i]["id"]), int(items[j - 1]["id"])))
+        i = max(j, i + 1)
+    return runs
 
 
 def _assert_speakable_translation_items(items: list[dict[str, Any]]) -> None:
@@ -913,9 +1035,19 @@ EXISTING MEMORY:
 SOURCE CHUNK {i}/{len(batches)}:
 {_source_lines(batch)}
 """
-        data = _gemini_json(ai, prompt, log=log)
-        if not isinstance(data, dict):
-            raise RuntimeError("Story context response must be a JSON object")
+        try:
+            data = _gemini_json(ai, prompt, log=log)
+            if not isinstance(data, dict):
+                raise RuntimeError("Story context response must be a JSON object")
+        except (GeminiKeyPoolExhaustedError, InterruptedError):
+            raise
+        except Exception as exc:
+            # 2026-10-12, a user's run: "Gemini JSON response failed after 3 attempts: Expecting ':' delimiter"
+            # stopped the whole job here (Resume then worked). The memory only helps keep names consistent,
+            # so one unreadable chunk is left out and the job goes on.
+            log(f"⚠️ Story Context {i}/{len(batches)}: Gemini's answer could not be read ({str(exc)[:160]}); "
+                "this part is left out of the story memory")
+            data = memory
         memory = {
             "characters": list(data.get("characters") or []),
             "relationships": list(data.get("relationships") or []),
@@ -1023,6 +1155,8 @@ HARD RULES:
 8. Timestamps are local metadata. Return no timestamps.
 9. Return JSON only with top-level key "items". Each item must contain integer "id" and non-empty string "translation".
 10. NEVER return placeholders such as "...", "…", dashes, empty text, or schema/example text. Every spoken SOURCE row must produce actual target-language narration words.
+11. Write EVERY word in Burmese script — no English/Latin words (the Burmese voice cannot read them). Translate titles and terms; write names of people, places and techniques in Burmese letters by sound, with one spelling per name.
+12. A sentence often runs across two IDs. Each ID says only its own source words: never tell the next ID's part early, never say again what the previous ID already said.
 """
     prompt = f"""
 {task_rules}
@@ -1057,6 +1191,31 @@ CRITICAL OUTPUT ID PROTOCOL:
             if stray and attempt < 3:  # the last answer is kept; build() drops the letters and logs the line
                 raise ValueError("letters of another script inside the Burmese (" + "; ".join(stray) +
                                  "); write every word in Burmese script")
+            english = [f"ID {int(x['id']):05d}: {', '.join(_latin_words(x['translation']))}"
+                       for x in translated if _latin_words(x["translation"])]
+            notes = [f"ID {int(x['id']):05d}" for x in translated if _note_text(x["translation"])]
+            repeats = find_repeated_next_lines(translated, previous_context)
+            twice = find_near_duplicates(translated, previous_context)
+            slid = _slid_runs(translated, next_context[0].get("source_text") if next_context else None)
+            if (english or notes or repeats or twice or slid) and attempt < 3:   # the last answer is kept
+                problems = []
+                if english:
+                    problems.append("English words inside the Burmese (" + "; ".join(english[:10]) + "): write them "
+                                    "in Burmese script — translate titles and terms, write names by sound")
+                if notes:
+                    problems.append("a note instead of narration (" + ", ".join(notes) + "): write the narration of "
+                                    "that ID's own source words, never a remark about IDs or context")
+                if repeats:
+                    problems.append("the same words twice (" + ", ".join(f"ID {b:05d} repeats the end of ID {a:05d}"
+                                                                         for a, b in repeats) + "): a sentence split "
+                                    "across two IDs - each ID says only its own source words, never the next ID's")
+                if twice:
+                    problems.append("the same thing said twice (" + ", ".join(f"IDs {a:05d} and {b:05d}" for a, b in twice)
+                                    + " say much the same): each ID says only its own source line")
+                if slid:
+                    problems.append("lines slid one ID early (" + ", ".join(f"IDs {a:05d}-{b:05d}" for a, b in slid)
+                                    + " each say the NEXT ID's source words): every ID translates its own source line")
+                raise ValueError("; ".join(problems))
             return translated
         except GeminiKeyPoolExhaustedError:
             raise
@@ -1697,6 +1856,12 @@ class RecapPlanBuilder:
                         log=self.log,
                     )
                 translated = _drop_foreign_letters(translated, self.log)
+                for row in translated:
+                    if _latin_words(row.get("translation")):
+                        self.log(f"⚠️ ID {int(row['id']):05d}: English words kept ({', '.join(_latin_words(row['translation']))}); "
+                                 "Edit Text can fix the line")
+                for a, b in find_repeated_next_lines(translated, translated_all[-1:]) + find_near_duplicates(translated, translated_all[-2:]):
+                    self.log(f"⚠️ IDs {a:05d}/{b:05d} may say the same thing twice; Edit Text can fix the lines")
                 translated_all.extend(translated)
                 completed_ids.update(int(x["id"]) for x in translated)
                 _atomic_json(translations_file, {

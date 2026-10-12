@@ -239,6 +239,25 @@ def segment_basename(seg: dict[str, Any]) -> str:
     return f"S{int(seg['segment_id']):04d}_{_stamp(float(seg['video_start']))}__{_stamp(float(seg['video_end']))}"
 
 
+# English glosses in brackets ("ဂူ (Gu)") are not read by the Burmese voice (2026-10-12).
+_GLOSS_RE = re.compile(r"\s*\((?=[^)]*[A-Za-z])[^)]*\)")
+_LATIN_RUN_RE = re.compile(r"[A-Za-z][A-Za-z'\u2019\-]*")
+
+
+def spoken_text(text: str) -> str:
+    """The narration as the voice should say it: Latin-letter glosses in ( ) dropped."""
+    value = str(text or "")
+    bare = _GLOSS_RE.sub("", value)
+    if bare != value and any(ch.isalpha() for ch in bare):
+        return re.sub(r"\s+", " ", bare).strip()
+    return value
+
+
+def without_english(text: str) -> str:
+    """Last try for a line Edge TTS gave no audio for: the English words left out."""
+    return re.sub(r"\s+", " ", _LATIN_RUN_RE.sub(" ", str(text or ""))).strip()
+
+
 def segment_fingerprint(seg: dict[str, Any], voice: str) -> str:
     payload = {
         "voice": voice,
@@ -1106,12 +1125,24 @@ class EdgeSmartSync:
             else:
                 self.progress(idx - 1, len(segments), f"Edge TTS {idx}/{len(segments)}")
                 self.log(f"🗣️ [{idx}/{len(segments)}] {base} generate via Edge TTS")
+                speak = spoken_text(seg["narration"])
                 try:
-                    produced = engine.generate_channel99_voice(seg["narration"], self.voice)
+                    try:
+                        produced = engine.generate_channel99_voice(speak, self.voice)
+                    except Exception:
+                        plain = without_english(speak)
+                        if plain == speak or not any(ch.isalpha() for ch in plain):
+                            raise
+                        # A line mixing English and Burmese sometimes gets no audio at all (2026-10-12).
+                        self.log(f"⚠️ [{idx}/{len(segments)}] no audio — trying again without the English words "
+                                 "(Edit Text can rewrite the line)")
+                        produced = engine.generate_channel99_voice(plain, self.voice)
                     if not produced or not Path(produced).is_file():
                         raise RuntimeError("TTS output path မရပါ။")
                 except Exception as exc:
-                    raise RuntimeError(f"TTS segment generate failed: {exc}") from exc
+                    # "FAILED at segment N" lets the app open Edit Text on that line.
+                    raise RuntimeError(f"Edge TTS FAILED at segment {idx} ({base}): {exc}\n\n"
+                                       f"Text: {seg['narration'][:200]}") from exc
                 produced_path = Path(produced).resolve()
                 shutil.copy2(produced_path, dst)
                 produced_path.unlink(missing_ok=True)

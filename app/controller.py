@@ -18,6 +18,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from core import FRAME_FILLS, OUTPUT_RATIOS, normalize_segments, output_canvas, probe_video_size
 from preview_tools import probe_duration as preview_probe_duration, extract_preview_frame, scale_logo_preview
+from narration_editor import NarrationEditor, failed_segment_from_error
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT_DIR / "config.json"
@@ -487,6 +488,7 @@ class App(tk.Tk):
         self.stop_btn = ttk.Button(btns, text="STOP SAFELY", style="Danger.TButton", command=self._stop, state="disabled")
         self.stop_btn.pack(side="left", padx=8)
         ttk.Button(btns, text="Open Job Folder", command=self._open_output).pack(side="left")
+        ttk.Button(btns, text="Edit Text", command=self._open_text_editor).pack(side="left", padx=(8, 0))
         ttk.Label(btns, textvariable=self.job_display, style="Muted.TLabel").pack(side="left", padx=(12, 0))
         ttk.Label(btns, textvariable=self.stage, style="Muted.TLabel").pack(side="right", padx=(8, 0))
         ttk.Label(btns, textvariable=self.status, style="Status.TLabel").pack(side="right")
@@ -908,6 +910,14 @@ class App(tk.Tk):
                     self.status.set("ERROR")
                     self.stage.set("Stopped")
                     messagebox.showerror("ERROR", str(payload))
+                    failed_segment = failed_segment_from_error(str(payload))
+                    if failed_segment and messagebox.askyesno(
+                        "Edit Text",
+                        f"Line {failed_segment} မှာ အသံထုတ်လို့ မရလို့ ရပ်သွားပါတယ်။\n"
+                        "စာသားကြောင့် ဖြစ်နိုင်ပါတယ် (ဥပမာ English စာလုံးတွေ ရောနေတာ) — အဲ့စာကြောင်းကို ဖွင့်ပြီး ပြင်မလား?\n"
+                        "ပြင်ပြီး Save နှိပ်ပြီးရင် START / RESUME ပြန်နှိပ်ပါ။",
+                    ):
+                        self._open_text_editor(failed_segment)
         except queue.Empty:
             pass
         self.after(150, self._pump)
@@ -1362,6 +1372,27 @@ class App(tk.Tk):
     def _running(self, yes: bool) -> None:
         self.start_btn.configure(state="disabled" if yes else "normal")
         self.stop_btn.configure(state="normal" if yes else "disabled")
+
+    def _open_text_editor(self, segment: int | None = None) -> None:
+        """Edit Text: read the English line next to its Burmese narration and fix the Burmese by hand."""
+        source_text = self.source.get().strip()
+        job = self.current_job or (_job_dir_for(Path(source_text)) if source_text else None)
+        if job is None or not (job / "smart_sync_plan.json").is_file():
+            messagebox.showinfo("Edit Text", "ဒီ video အတွက် translation plan မရှိသေးပါ။ START နှိပ်ပြီး translation ပြီးမှ ပြင်လို့ရပါမယ်။")
+            return
+        existing = getattr(self, "_text_editor", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            if segment:
+                existing._show(max(1, min(int(segment), len(existing.segments))))
+            return
+        self._text_editor = NarrationEditor(
+            self, job, start_segment=segment or 1, on_saved=lambda n, _t: self._narration_saved(n),
+            colors={"bg": BG, "panel": PANEL, "fg": FG, "muted": MUTED},
+        )
+
+    def _narration_saved(self, segment: int) -> None:
+        self._log(f"✏️ Line {segment} saved — START / RESUME gives a new voice only to the edited line(s).")
 
     def _open_output(self) -> None:
         if not self.source.get().strip():
