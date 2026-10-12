@@ -1353,6 +1353,7 @@ class App(tk.Tk):
             "short_pauses": bool(settings.get("short_pauses", True)),
             "output_ratio": settings.get("output_ratio", "16:9"),
             "frame_fill": settings.get("frame_fill", "blur"),
+            "gemini_env_path": settings.get("gemini_env_path", ""),
             "stop_file": str(stop_file),
         })
         result = self._run_child("render_worker.py", render_cfg, "STEP 2 — Edge TTS + Smart Sync").get("result") or {}

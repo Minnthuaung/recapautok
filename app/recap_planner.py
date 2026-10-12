@@ -21,7 +21,16 @@ LogFn = Callable[[str], None]
 ProgressFn = Callable[[int, int, str], None]
 PLANNER_MODE = "timestamp_translation_en_to_mm_narrator_v1"
 TRANSLATION_DIRECTION = "en_to_mm"
-SEGMENTATION_PROFILE = "v23_v2_local_sync_4p2_5p6"
+# Whole-sentence lines like VOXCPM recap (2026-10-12): a line ends at a sentence end (or a clause after 6.5 s,
+# a breath after 10 s, at most 24 s). The old 4-6 s lines cut 20-35% of sentences in two, and Gemini then told a
+# sentence whole in its first line and said it again (or slid every next line one early). A job started with
+# the old lines keeps them (its translation and voices stay).
+SEGMENTATION_PROFILE = "v33_sentence_locked_6p5_10_24"
+SHORT_SEGMENTATION_PROFILE = "v23_v2_local_sync_4p2_5p6"
+SENTENCE_UNIT_TARGET = 6.5      # after this a clause mark (, ; :) may end the line
+SENTENCE_UNIT_BREATH = 10.0     # after this a 0.35 s pause may end it
+SENTENCE_UNIT_HARD = 24.0       # never longer
+SENTENCE_UNIT_GAP = 1.5         # a pause this long always ends a line
 # Original V2 visual boundary: first frame to last frame, every gap between two
 # narration units split at its midpoint.
 BOUNDARY_PROFILE = "v2_full_coverage_midpoint"
@@ -681,6 +690,7 @@ def atomicize_timestamp_segments(
     max_duration: float = 5.6,
     target_duration: float = 4.2,
     max_words: int = 24,
+    sentence_locked: bool = False,
 ) -> list[dict[str, Any]]:
     """Build V2-style local sync units from measured word timestamps.
 
@@ -722,6 +732,18 @@ def atomicize_timestamp_segments(
         if index + 1 < len(tokens):
             next_gap = max(0.0, float(tokens[index + 1]["start"]) - float(token["end"]))
 
+        if sentence_locked:
+            if next_gap >= SENTENCE_UNIT_GAP:
+                close_current("pause")
+            elif _word_ends_sentence(text):
+                close_current("sentence")
+            elif duration >= SENTENCE_UNIT_TARGET and _word_ends_soft_clause(text):
+                close_current("clause")
+            elif duration >= SENTENCE_UNIT_BREATH and next_gap >= 0.35:
+                close_current("pause")
+            elif duration >= SENTENCE_UNIT_HARD:
+                close_current("forced_long")
+            continue
         # A real acoustic gap is always a safe boundary, even when the phrase is short.
         # This prevents a 20-50s silent/dialogue hole from being absorbed by the next unit.
         if next_gap >= 1.0:
@@ -1491,6 +1513,18 @@ def make_translation_plan(units: list[dict[str, Any]], video_duration: float, *,
     }
 
 
+def _job_segmentation_profile(state_file: Path, translations_file: Path) -> str:
+    """Whole sentences for a new job; a job whose translation was started with 4-6 s lines keeps them."""
+    for path in (translations_file,):
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(saved.get("segmentation_profile") or "") == SHORT_SEGMENTATION_PROFILE:
+            return SHORT_SEGMENTATION_PROFILE
+    return SEGMENTATION_PROFILE
+
+
 class RecapPlanBuilder:
     """English narrator video → timestamp-locked Burmese narration plan (narrator-only source)."""
 
@@ -1570,6 +1604,8 @@ class RecapPlanBuilder:
         state_file = job_dir / "planner_checkpoint.json"
         fp = _source_fingerprint_for_mode(
             source, PLANNER_MODE + "|" + TRANSLATION_DIRECTION + f"|whisper:{whisper_model}:{whisper_language}")
+        segmentation_profile = _job_segmentation_profile(state_file, translations_file)
+        sentence_lines = segmentation_profile == SEGMENTATION_PROFILE
 
         if reuse and plan_file.is_file() and transcript_file.is_file() and state_file.is_file():
             try:
@@ -1580,8 +1616,8 @@ class RecapPlanBuilder:
                     and state.get("plan_ready") is True
                     and state.get("planner_mode") == PLANNER_MODE
                     and plan.get("planner_mode") == PLANNER_MODE
-                    and str(state.get("segmentation_profile") or "") == SEGMENTATION_PROFILE
-                    and str(plan.get("segmentation_profile") or "") == SEGMENTATION_PROFILE
+                    and str(state.get("segmentation_profile") or "") == segmentation_profile
+                    and str(plan.get("segmentation_profile") or "") == segmentation_profile
                     and str(state.get("boundary_profile") or "") == BOUNDARY_PROFILE
                     and str(plan.get("boundary_profile") or "") == BOUNDARY_PROFILE
                 ):
@@ -1685,17 +1721,20 @@ class RecapPlanBuilder:
             self._release_whisper_gpu(whisper)
 
         self.log("✅ Narrator source: all transcript speech kept; original V2 Smart Sync boundaries")
+        self.log("✂️ Lines: whole sentences (a line ends at a sentence end)" if sentence_lines else
+                 "✂️ Lines: 4-6 s (this job was started that way; a new job uses whole sentences)")
         units = atomicize_timestamp_segments(
             transcript,
             max_duration=self.atomic_max_duration,
             target_duration=self.atomic_target_duration,
+            sentence_locked=sentence_lines,
         )
         units = _filter_local_whisper_artifact_units(units, transcript, log=self.log)
         if not units:
             raise RuntimeError("Timestamp transcript units မရှိပါ။")
         _atomic_json(atomic_file, {
             "planner_mode": PLANNER_MODE,
-            "segmentation_profile": SEGMENTATION_PROFILE,
+            "segmentation_profile": segmentation_profile,
             "units": units,
         })
         forced_units = sum(1 for unit in units if unit.get("forced_boundary"))
@@ -1703,13 +1742,15 @@ class RecapPlanBuilder:
         avg_duration = (sum(durations) / len(durations)) if durations else 0.0
         self.log(
             f"🧩 V2-style local sync units: {len(units)} | avg={avg_duration:.2f}s | "
-            f"target={self.atomic_target_duration:.1f}s max={self.atomic_max_duration:.1f}s | forced={forced_units}"
+            + (f"whole sentences (max {SENTENCE_UNIT_HARD:.0f}s)" if sentence_lines else
+               f"target={self.atomic_target_duration:.1f}s max={self.atomic_max_duration:.1f}s")
+            + f" | forced={forced_units}"
         )
 
         _atomic_json(state_file, {
             "version": 5,
             "planner_mode": PLANNER_MODE,
-            "segmentation_profile": SEGMENTATION_PROFILE,
+            "segmentation_profile": segmentation_profile,
             "boundary_profile": BOUNDARY_PROFILE,
             "source_fingerprint": fp,
             "source_path": str(source),
@@ -1735,7 +1776,7 @@ class RecapPlanBuilder:
 
             self.progress(1, 4, "Story context memory")
             self.log("🧠 [2/4] Gemini Story Context Memory pass...")
-            context_source_fp = fp + "|seg:" + SEGMENTATION_PROFILE
+            context_source_fp = fp + "|seg:" + segmentation_profile
             story_context = build_story_context(
                 ai, units,
                 batch_max_items=self.story_context_batch_max_items,
@@ -1760,7 +1801,7 @@ class RecapPlanBuilder:
                     saved = json.loads(translations_file.read_text(encoding="utf-8"))
                     saved_items = saved.get("items") or []
                     if (saved.get("planner_mode") == PLANNER_MODE and saved.get("source_fingerprint") == fp
-                            and str(saved.get("segmentation_profile") or "") == SEGMENTATION_PROFILE
+                            and str(saved.get("segmentation_profile") or "") == segmentation_profile
                             and isinstance(saved_items, list)):
                         saved_by_id: dict[int, dict[str, Any]] = {}
                         for row in saved_items:
@@ -1866,7 +1907,7 @@ class RecapPlanBuilder:
                 completed_ids.update(int(x["id"]) for x in translated)
                 _atomic_json(translations_file, {
                     "planner_mode": PLANNER_MODE,
-                    "segmentation_profile": SEGMENTATION_PROFILE,
+                    "segmentation_profile": segmentation_profile,
                     "source_fingerprint": fp,
                     "translation_direction": TRANSLATION_DIRECTION,
                     "completed": len(translated_all),
@@ -1887,7 +1928,7 @@ class RecapPlanBuilder:
             story_context=story_context,
         )
         plan["standalone_source_path"] = str(source)
-        plan["segmentation_profile"] = SEGMENTATION_PROFILE
+        plan["segmentation_profile"] = segmentation_profile
         plan["boundary_profile"] = BOUNDARY_PROFILE
         plan["translation_direction"] = TRANSLATION_DIRECTION
         plan["source_language"] = "en"
@@ -1918,7 +1959,7 @@ class RecapPlanBuilder:
         _atomic_json(state_file, {
             "version": 5,
             "planner_mode": PLANNER_MODE,
-            "segmentation_profile": SEGMENTATION_PROFILE,
+            "segmentation_profile": segmentation_profile,
             "boundary_profile": BOUNDARY_PROFILE,
             "source_fingerprint": fp,
             "source_path": str(source),

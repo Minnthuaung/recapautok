@@ -26,6 +26,16 @@ def main() -> int:
     cfg_path = Path(sys.argv[1]).resolve()
     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
     stop_file = Path(cfg["stop_file"]).resolve()
+    env_file = Path(str(cfg.get("gemini_env_path") or ""))
+    if env_file.is_file():                      # only the proxy settings: Edge TTS needs no key
+        try:
+            import os
+            from dotenv import dotenv_values
+            for name, value in dotenv_values(env_file).items():
+                if name in ("EDGE_TTS_PROXY", "GEMINI_PROXY") and value:
+                    os.environ[name] = str(value)
+        except Exception:
+            pass
 
     def log(msg: str) -> None:
         emit("log", text=str(msg))

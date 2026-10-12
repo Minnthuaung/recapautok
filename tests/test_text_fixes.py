@@ -107,5 +107,52 @@ class EditTextTests(unittest.TestCase):
         self.assertIn("self._open_text_editor(failed_segment)", source)
 
 
+class SentenceLineTests(unittest.TestCase):
+    """Whole-sentence lines like VOXCPM recap: a sentence is never cut in two, so it is not told twice."""
+
+    @staticmethod
+    def _transcript(text: str, step: float = 0.35, pause_every: int = 0, pause: float = 0.0) -> dict:
+        words, t = [], 0.0
+        for i, w in enumerate(text.split()):
+            words.append({"text": w, "start": t, "end": t + step - 0.05})
+            t += step + (pause if pause_every and (i + 1) % pause_every == 0 else 0.0)
+        return {"segments": [{"id": 0, "start": 0.0, "end": t, "text": text, "words": words}]}
+
+    def test_a_long_sentence_stays_one_line(self):
+        sentence = ("He told his master that he had never tried to poison her and that he only wanted to leave "
+                    "the sect before the others found out.")
+        tr = self._transcript(sentence, pause_every=8, pause=0.55)
+        self.assertGreater(len(rp.atomicize_timestamp_segments(tr)), 1)
+        lines = rp.atomicize_timestamp_segments(tr, sentence_locked=True)
+        self.assertEqual([u["source_text"] for u in lines], [sentence])
+
+    def test_new_jobs_use_sentences_and_started_jobs_keep_their_lines(self):
+        import json
+        import tempfile
+        folder = Path(tempfile.mkdtemp())
+        translations = folder / "timestamp_translations.json"
+        self.assertEqual(rp._job_segmentation_profile(folder / "planner_checkpoint.json", translations),
+                         rp.SEGMENTATION_PROFILE)
+        translations.write_text(json.dumps({"segmentation_profile": rp.SHORT_SEGMENTATION_PROFILE}), encoding="utf-8")
+        self.assertEqual(rp._job_segmentation_profile(folder / "planner_checkpoint.json", translations),
+                         rp.SHORT_SEGMENTATION_PROFILE)
+
+
+class EdgeRefusedTests(unittest.TestCase):
+    def test_a_403_is_explained_and_does_not_offer_edit_text(self):
+        self.assertTrue(core.is_edge_refused("WSServerHandshakeError: 403, message='Invalid response status'"))
+        self.assertFalse(core.is_edge_refused("NoAudioReceived"))
+        self.assertIn("VPN", core.EDGE_403_HELP)
+        source = (APP / "core.py").read_text(encoding="utf-8")
+        self.assertIn("if is_edge_refused(exc):", source)          # raised before the "FAILED at segment" text
+        self.assertIsNone(ne.failed_segment_from_error("Edge TTS stopped at line 12/300.\n\n" + core.EDGE_403_HELP))
+
+    def test_the_proxy_tries_use_the_configured_proxy(self):
+        with mock.patch.dict("os.environ", {"EDGE_TTS_PROXY": "http://127.0.0.1:7890"}):
+            self.assertEqual(core.edge_proxy(), "http://127.0.0.1:7890")
+        with mock.patch.dict("os.environ", {"EDGE_TTS_PROXY": "none"}):
+            self.assertIsNone(core.edge_proxy())
+
+
 if __name__ == "__main__":
     unittest.main()

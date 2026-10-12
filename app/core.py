@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import subprocess
 import re
 import unicodedata
@@ -45,6 +46,46 @@ def resolve_binary(explicit: str | None, executable: str, common: Iterable[str] 
     raise FileNotFoundError(f"{executable} မတွေ့ပါ။ config.json / PATH ကိုစစ်ပါ။")
 
 
+# A user's PC got "WSServerHandshakeError: 403, message='Invalid response status'" on every try (2026-10-12):
+# Microsoft's voice service refused the connection. It refuses many VPN / proxy servers: here the direct
+# route worked while the same request through a v2rayN server got 403. edge-tts already corrects a wrong clock
+# once. The "proxy" tries go through the PC's proxy (aiohttp does not read the Windows proxy by itself) for
+# networks where only a proxy works, and the error says what to try.
+EDGE_403_HELP = (
+    "Microsoft's Edge voice service refused the connection (403). It refuses many VPN / proxy servers.\n"
+    "1) If a VPN is on (v2rayN, Psiphon, 1.1.1.1 …), turn it off — or switch to another server — then press START / RESUME.\n"
+    "2) Windows clock: Settings → Time & language → Set time automatically + the right time zone.\n"
+    "3) Run INSTALL_REQUIREMENTS.bat again (it updates edge-tts).\n"
+    "VPN ဖွင့်ထားရင် ပိတ်ပြီး (သို့) server ပြောင်းပြီး START / RESUME ပြန်နှိပ်ပါ။ ကွန်ပျူတာ နာရီ/Time zone မှန်မမှန်လည်း စစ်ပါ။"
+)
+
+
+def edge_proxy() -> str | None:
+    """Proxy for the Edge TTS "proxy" tries: EDGE_TTS_PROXY / GEMINI_PROXY, else the Windows proxy, else a local
+    v2rayN on 127.0.0.1:10808 when it is running, else none."""
+    value = str(os.getenv("EDGE_TTS_PROXY") or os.getenv("GEMINI_PROXY") or "").strip()
+    if value:
+        return None if value.lower() in {"none", "direct", "off"} else value
+    try:
+        import urllib.request
+        found = urllib.request.getproxies()
+        value = str(found.get("https") or found.get("http") or "").strip()
+        if value:
+            return value if "://" in value else "http://" + value
+    except Exception:
+        pass
+    try:
+        with socket.create_connection(("127.0.0.1", 10808), timeout=0.2):
+            return "http://127.0.0.1:10808"
+    except OSError:
+        return None
+
+
+def is_edge_refused(error: BaseException | str) -> bool:
+    text = str(error)
+    return "403" in text or "WSServerHandshakeError" in text
+
+
 class EdgeTTSEngine:
     """Local Edge-TTS adapter with resilient direct/system-route retries.
 
@@ -78,7 +119,9 @@ class EdgeTTSEngine:
             edge_ver = _pkg_version("edge-tts")
         except Exception:
             edge_ver = "unknown"
-        self.log(f"✅ Edge TTS READY — version={edge_ver}, rate={self.rate}, pitch={self.pitch}")
+        self.proxy = edge_proxy()
+        self.log(f"✅ Edge TTS READY — version={edge_ver}, rate={self.rate}, pitch={self.pitch}"
+                 + (f" | proxy tries via {self.proxy}" if self.proxy else ""))
 
     @staticmethod
     def _clean_text(text: str) -> str:
@@ -94,13 +137,14 @@ class EdgeTTSEngine:
             )
         return value
 
-    async def _save_mp3_async(self, text: str, voice: str, mp3: Path) -> None:
+    async def _save_mp3_async(self, text: str, voice: str, mp3: Path, proxy: str | None = None) -> None:
         import edge_tts
         communicate = edge_tts.Communicate(
             text,
             voice=str(voice),
             rate=self.rate,
             pitch=self.pitch,
+            proxy=proxy,
         )
         await communicate.save(str(mp3))
 
@@ -115,7 +159,7 @@ class EdgeTTSEngine:
                         os.environ.pop(key, None)
                     os.environ["NO_PROXY"] = "*"
                     os.environ["no_proxy"] = "*"
-                asyncio.run(self._save_mp3_async(text, voice, mp3))
+                asyncio.run(self._save_mp3_async(text, voice, mp3, None if direct else self.proxy))
             finally:
                 for key, old_value in backup.items():
                     if old_value is None:
@@ -163,6 +207,8 @@ class EdgeTTSEngine:
                 self.log(f"⚠️ Edge TTS {route_name} attempt {attempt}/{len(routes)} failed: {name}: {msg}")
         else:
             preview = clean_text[:160].replace("\n", " ")
+            if all(is_edge_refused(e) for e in errors):
+                raise RuntimeError(EDGE_403_HELP + "\n\nLast error: " + errors[-1][:300])
             raise RuntimeError(
                 "Edge TTS service returned no audio after direct + system/proxy retries. "
                 f"voice={voice}, rate={self.rate}, pitch={self.pitch}, chars={len(clean_text)}, "
@@ -1129,9 +1175,9 @@ class EdgeSmartSync:
                 try:
                     try:
                         produced = engine.generate_channel99_voice(speak, self.voice)
-                    except Exception:
+                    except Exception as first:
                         plain = without_english(speak)
-                        if plain == speak or not any(ch.isalpha() for ch in plain):
+                        if is_edge_refused(first) or plain == speak or not any(ch.isalpha() for ch in plain):
                             raise
                         # A line mixing English and Burmese sometimes gets no audio at all (2026-10-12).
                         self.log(f"⚠️ [{idx}/{len(segments)}] no audio — trying again without the English words "
@@ -1140,6 +1186,8 @@ class EdgeSmartSync:
                     if not produced or not Path(produced).is_file():
                         raise RuntimeError("TTS output path မရပါ။")
                 except Exception as exc:
+                    if is_edge_refused(exc):            # the network, not the text: no Edit Text offer
+                        raise RuntimeError(f"Edge TTS stopped at line {idx}/{len(segments)}.\n\n{exc}") from exc
                     # "FAILED at segment N" lets the app open Edit Text on that line.
                     raise RuntimeError(f"Edge TTS FAILED at segment {idx} ({base}): {exc}\n\n"
                                        f"Text: {seg['narration'][:200]}") from exc

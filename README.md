@@ -122,6 +122,10 @@ Tool ဖွင့်ပြီး START နှိပ်လိုက်ရင် `
 | `title_font_path` | `C:\Windows\Fonts\mmrtext.ttf` | Title / Extra text ဖောင့် |
 | `overlay_blur_strength` | `18` | Blur box ရဲ့ ဝါးအား |
 
+## စာကြောင်း ခွဲပုံ
+
+English စာကို **စာကြောင်း (sentence) တစ်ကြောင်းချင်း** ခွဲပြီး ဘာသာပြန်ပါတယ် (VoxCPM recap လိုပါပဲ)။ စာကြောင်း တစ်ဝက်ကနေ မဖြတ်တော့လို့ Gemini က စာကြောင်းတစ်ကြောင်းကို နှစ်ခါ မပြောတော့ပါဘူး။ စာကြောင်းရှည်ရင် ကော်မာ (သို့) အသက်ရှူတဲ့ နေရာမှာ ဖြတ်ပါတယ် (အများဆုံး ၂၄ စက္ကန့်)။ Version အဟောင်းနဲ့ ဘာသာပြန်ပြီးသား job ကို resume လုပ်ရင်တော့ ဖြတ်ပုံဟောင်း (၄–၆ စက္ကန့်) နဲ့ပဲ ဆက်လုပ်ပါတယ် — ဘာသာပြန်ပြီးသားနဲ့ အသံတွေ မပျက်အောင်ပါ။
+
 ## စာသား ပြင်နည်း (Edit Text)
 
 ဘာသာပြန်ပြီးသွားရင် **Edit Text** နှိပ်ပြီး စာကြောင်းတိုင်းရဲ့ English မူရင်းနဲ့ မြန်မာ narration ကို ဘေးချင်းယှဉ် ကြည့်ပြီး ပြင်လို့ရပါတယ်။
@@ -140,6 +144,7 @@ Tool ဖွင့်ပြီး START နှိပ်လိုက်ရင် `
 | Log မှာ `GPU Whisper failed … using the CPU instead` | NVIDIA GPU ရှိပေမဲ့ CUDA 12 library (cuBLAS/cuDNN) မရှိလို့ CPU နဲ့ ဆက်လုပ်တာပါ။ အလုပ်ပြီးပါတယ်၊ နည်းနည်းပဲ ပိုကြာပါတယ်။ |
 | `You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN…` ပြပြီး ရပ်နေသလို ဖြစ်နေတယ် | HF token **မလိုပါဘူး**။ Warning သက်သက်ပါ။ ပထမဆုံးအကြိမ်မှာ Whisper model (~460 MB) ကို download လုပ်နေတာပါ။ Log မှာ `⬇️ Whisper model: … MB downloaded` လို့ ၅ စက္ကန့်တစ်ခါ ပြပါတယ်။ တစ်ခါပဲ download လုပ်ရပါတယ်။ huggingface.co မဖွင့်ရတဲ့ စက်ဆိုရင် VPN သုံးပါ (သို့) `.env` ထဲမှာ `HF_ENDPOINT=https://hf-mirror.com` ထည့်ပါ။ |
 | Edge TTS `NoAudioReceived` | Internet ကို စစ်ပါ။ Tool က တိုက်ရိုက် ၂ ကြိမ်၊ system proxy နဲ့ ၂ ကြိမ် ပြန်စမ်းပါတယ်။ English စာလုံး ရောနေတဲ့ စာကြောင်းဆိုရင် English စာလုံးတွေ ချန်ပြီး တစ်ခါ ထပ်စမ်းပါတယ်။ |
+| `403, message='Invalid response status'` (`WSServerHandshakeError`) | Microsoft ရဲ့ အသံ service က ချိတ်ဆက်မှုကို ငြင်းတာပါ — VPN / proxy server တော်တော်များများကို ငြင်းပါတယ်။ **VPN ဖွင့်ထားရင် ပိတ်ပါ** (သို့) server ပြောင်းပါ။ ကွန်ပျူတာ နာရီ/Time zone ကို Settings → Time & language → Set time automatically နဲ့ မှန်အောင်ထားပါ။ မရသေးရင် `INSTALL_REQUIREMENTS.bat` ကို ပြန် run ပါ (edge-tts ကို update လုပ်ပါတယ်)။ ပြီးရင် **START / RESUME**။ VPN မပါရင် မရတဲ့ network ဆိုရင် `.env` ထဲမှာ `EDGE_TTS_PROXY=http://127.0.0.1:<port>` ထည့်ပါ။ |
 | `Edge TTS FAILED at segment 123` | အဲ့စာကြောင်းမှာ အသံ မထွက်လို့ ရပ်တာပါ။ **Yes** နှိပ်ရင် Edit Text ပွင့်လာပါမယ် — မြန်မာလို ပြင်ပြီး Save → **START / RESUME**။ |
 | `Gemini JSON response failed after 3 attempts` | Gemini ရဲ့ အဖြေ ပျက်နေတာပါ။ **START / RESUME** ပြန်နှိပ်ရင် ဆက်လုပ်ပါတယ်။ (Story context အဆင့်မှာဆိုရင် အခု version က အဲ့အပိုင်းကို ချန်ပြီး ဆက်သွားလို့ မရပ်တော့ပါ။) |
 | `[WinError 2] The system cannot find the file specified` (သို့) `ffmpeg.exe မတွေ့ပါ` (Preview မှာ `00:00 / 00:00`) | FFmpeg မရှိလို့ပါ။ `INSTALL_REQUIREMENTS.bat` ကို ပြန် run ပါ (FFmpeg ကို `ffmpeg\` ထဲ ထည့်ပေးပါမယ်)။ (သို့) gyan.dev ကနေ download လုပ်ပြီး `ffmpeg.exe`၊ `ffprobe.exe` ကို `RUN.bat` ဘေးက `ffmpeg` folder ထဲ ထည့်ပါ။ |
@@ -249,6 +254,12 @@ Double-click **`RUN.bat`**:
   everything; **Open Job Folder**; **Edit Text** — read each English line next to its Burmese narration,
   fix the Burmese and Save; START / RESUME then re-voices only the edited lines. When a line gets no
   audio (e.g. English and Burmese mixed), the error names the line and offers to open Edit Text on it.
+- Lines are whole English sentences (like the VoxCPM recap tool), so a sentence is never cut in two and told
+  twice; a long sentence ends at a comma or a breath (24 s at most). A job translated with an older version
+  keeps its 4-6 s lines when resumed.
+- Edge TTS `403 Invalid response status`: Microsoft refuses many VPN / proxy servers — turn the VPN off (or
+  change server), set the Windows clock automatically, or run INSTALL_REQUIREMENTS.bat again; on a network that
+  needs a proxy put `EDGE_TTS_PROXY=http://127.0.0.1:<port>` in the .env.
 
 Result: `jobs\<name>_<code>\edge_tts_smart_sync\final_edge_tts_smart_sync.mp4`
 (plus `whisper_transcript.txt`, `timestamp_translations.json`, `smart_sync_plan.json`, `run.log`).
