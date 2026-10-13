@@ -145,6 +145,7 @@ English စာကို **စာကြောင်း (sentence) တစ်ကြ
 | `You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN…` ပြပြီး ရပ်နေသလို ဖြစ်နေတယ် | HF token **မလိုပါဘူး**။ Warning သက်သက်ပါ။ ပထမဆုံးအကြိမ်မှာ Whisper model (~460 MB) ကို download လုပ်နေတာပါ။ Log မှာ `⬇️ Whisper model: … MB downloaded` လို့ ၅ စက္ကန့်တစ်ခါ ပြပါတယ်။ တစ်ခါပဲ download လုပ်ရပါတယ်။ huggingface.co မဖွင့်ရတဲ့ စက်ဆိုရင် VPN သုံးပါ (သို့) `.env` ထဲမှာ `HF_ENDPOINT=https://hf-mirror.com` ထည့်ပါ။ |
 | Edge TTS `NoAudioReceived` | Internet ကို စစ်ပါ။ Tool က တိုက်ရိုက် ၂ ကြိမ်၊ system proxy နဲ့ ၂ ကြိမ် ပြန်စမ်းပါတယ်။ English စာလုံး ရောနေတဲ့ စာကြောင်းဆိုရင် English စာလုံးတွေ ချန်ပြီး တစ်ခါ ထပ်စမ်းပါတယ်။ |
 | `403, message='Invalid response status'` (`WSServerHandshakeError`) | Microsoft ရဲ့ အသံ service က ချိတ်ဆက်မှုကို ငြင်းတာပါ — VPN / proxy server တော်တော်များများကို ငြင်းပါတယ်။ **VPN ဖွင့်ထားရင် ပိတ်ပါ** (သို့) server ပြောင်းပါ။ ကွန်ပျူတာ နာရီ/Time zone ကို Settings → Time & language → Set time automatically နဲ့ မှန်အောင်ထားပါ။ မရသေးရင် `INSTALL_REQUIREMENTS.bat` ကို ပြန် run ပါ (edge-tts ကို update လုပ်ပါတယ်)။ ပြီးရင် **START / RESUME**။ VPN မပါရင် မရတဲ့ network ဆိုရင် `.env` ထဲမှာ `EDGE_TTS_PROXY=http://127.0.0.1:<port>` ထည့်ပါ။ |
+| `ဒီဗီဒီယိုမှာ English စကား မကြားရပါဘူး` (သို့) `whisper_transcript.txt` ထဲမှာ "I'm not going to do it." လို စာကြောင်း တူတူတွေ ထပ်ခါထပ်ခါ ရေးထားပြီး မြန်မာအသံ မှားထွက်တယ် | ဗီဒီယိုက English စကား မဟုတ်လို့ပါ (တရုတ် / ဟိန္ဒီ / ကိုရီးယား …)။ ဒီ tool က **English ပြောတဲ့ ဗီဒီယိုအတွက်ပဲ** ဖြစ်ပါတယ် — English Whisper က တခြားဘာသာကို မကြားဘဲ English စာကြောင်း အနည်းငယ်ကို ထပ်ခါထပ်ခါ ရေးပါတယ်။ အခု version က ဘာသာပြန်မစခင် ရပ်ပြီး ပြောပေးပါတယ်။ English ဗီဒီယို ဖြစ်ပါလျက် ဒီ error တက်ရင် `whisper_transcript.txt` ကို စစ်ပါ (သီချင်း / ဆူညံသံ များတာ ဖြစ်နိုင်ပါတယ်)။ |
 | `Edge TTS FAILED at segment 123` | အဲ့စာကြောင်းမှာ အသံ မထွက်လို့ ရပ်တာပါ။ **Yes** နှိပ်ရင် Edit Text ပွင့်လာပါမယ် — မြန်မာလို ပြင်ပြီး Save → **START / RESUME**။ |
 | `Gemini JSON response failed after 3 attempts` | Gemini ရဲ့ အဖြေ ပျက်နေတာပါ။ **START / RESUME** ပြန်နှိပ်ရင် ဆက်လုပ်ပါတယ်။ (Story context အဆင့်မှာဆိုရင် အခု version က အဲ့အပိုင်းကို ချန်ပြီး ဆက်သွားလို့ မရပ်တော့ပါ။) |
 | `[WinError 2] The system cannot find the file specified` (သို့) `ffmpeg.exe မတွေ့ပါ` (Preview မှာ `00:00 / 00:00`) | FFmpeg မရှိလို့ပါ။ `INSTALL_REQUIREMENTS.bat` ကို ပြန် run ပါ (FFmpeg ကို `ffmpeg\` ထဲ ထည့်ပေးပါမယ်)။ (သို့) gyan.dev ကနေ download လုပ်ပြီး `ffmpeg.exe`၊ `ffprobe.exe` ကို `RUN.bat` ဘေးက `ffmpeg` folder ထဲ ထည့်ပါ။ |
@@ -257,6 +258,9 @@ Double-click **`RUN.bat`**:
 - Lines are whole English sentences (like the VoxCPM recap tool), so a sentence is never cut in two and told
   twice; a long sentence ends at a comma or a breath (24 s at most). A job translated with an older version
   keeps its 4-6 s lines when resumed.
+- English-speaking videos only: on Chinese / Hindi / Korean … speech the English Whisper writes a few English
+  phrases again and again ("I'm not going to do it." ×40) and the narration comes out wrong; when a quarter of
+  the Whisper lines repeat, the job now stops before translating and says so.
 - Edge TTS `403 Invalid response status`: Microsoft refuses many VPN / proxy servers — turn the VPN off (or
   change server), set the Windows clock automatically, or run INSTALL_REQUIREMENTS.bat again; on a network that
   needs a proxy put `EDGE_TTS_PROXY=http://127.0.0.1:<port>` in the .env.

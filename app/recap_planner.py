@@ -571,6 +571,52 @@ def _unit_is_low_information_repetition(unit: dict[str, Any]) -> bool:
     return False
 
 
+# Not English (2026-10-13, a user's second video): the English-only Whisper (small.en) does not stop on Hindi,
+# Chinese, … speech - it writes a few English phrases again and again ("I'm not going to do it." ×40, "We are all"
+# ×N) and most of the speech is lost, so the video came out with wrong narration. In English transcripts 0-0.1% of
+# the lines repeat one of the 5 before them; in two non-English videos 65% and 77% did.
+NOT_ENGLISH_REPEAT_SHARE = 0.25
+NOT_ENGLISH_MIN_LINES = 10
+
+
+def _repeated_line_share(transcript: dict[str, Any]) -> tuple[float, int, list[tuple[str, int]]]:
+    """(share of lines of 3+ words that say the same as one of the 5 lines before them, lines counted,
+    the most repeated lines with their counts)."""
+    lines = []
+    for seg in transcript.get("segments") or []:
+        if isinstance(seg, dict):
+            text = re.sub(r"[^a-z0-9 ]", "", _clean(seg.get("text")).lower()).strip()
+            text = re.sub(r"\s+", " ", text)
+            if len(text.split()) >= 3:
+                lines.append(text)
+    if not lines:
+        return 0.0, 0, []
+    repeated = sum(1 for i, text in enumerate(lines) if text in lines[max(0, i - 5):i])
+    counts: dict[str, int] = {}
+    for text in lines:
+        counts[text] = counts.get(text, 0) + 1
+    top = sorted(counts.items(), key=lambda kv: -kv[1])[:3]
+    return repeated / len(lines), len(lines), top
+
+
+def _check_english_speech(transcript: dict[str, Any], transcript_name: str) -> None:
+    """Stop before any Gemini request when Whisper clearly did not hear English speech."""
+    share, count, top = _repeated_line_share(transcript)
+    if count < NOT_ENGLISH_MIN_LINES or share < NOT_ENGLISH_REPEAT_SHARE:
+        return
+    examples = ", ".join(f'"{text}" ×{n}' for text, n in top if n > 1)
+    raise RuntimeError(
+        f"ဒီဗီဒီယိုမှာ English စကား မကြားရပါဘူး — Whisper transcript ရဲ့ စာကြောင်း {share:.0%} က "
+        f"တူတူ ထပ်နေပါတယ် ({examples})။\n"
+        "ဒီ tool က English ပြောတဲ့ ဗီဒီယို → မြန်မာ အတွက်ပဲ ဖြစ်ပါတယ်။ တရုတ် / ဟိန္ဒီ / ကိုရီးယား စတဲ့ "
+        "တခြားဘာသာ ဗီဒီယိုဆိုရင် English Whisper က စကားကို မကြားဘဲ ဒီလို English စာကြောင်းတွေ ထပ်ခါထပ်ခါ ရေးပြီး "
+        "မြန်မာအသံ မှားထွက်ပါတယ်။\n"
+        f"English ဗီဒီယို ဖြစ်ရင် {transcript_name} ကို ဖွင့်စစ်ပါ (သီချင်း / နောက်ခံဆူညံသံ များနေတာ ဖြစ်နိုင်ပါတယ်)။\n"
+        f"Not English speech: {share:.0%} of the Whisper lines repeat ({examples}). "
+        "This tool is for English-speaking videos only."
+    )
+
+
 def _filter_local_whisper_artifact_units(
     units: list[dict[str, Any]],
     transcript: dict[str, Any],
@@ -1725,6 +1771,7 @@ class RecapPlanBuilder:
             self.log(f"📝 Raw transcript: {transcript_text_file.name}")
             self._release_whisper_gpu(whisper)
 
+        _check_english_speech(transcript, transcript_text_file.name)   # before any Gemini request
         self.log("✅ Narrator source: all transcript speech kept; original V2 Smart Sync boundaries")
         self.log("✂️ Lines: whole sentences (a line ends at a sentence end)" if sentence_lines else
                  "✂️ Lines: 4-6 s (this job was started that way; a new job uses whole sentences)")
