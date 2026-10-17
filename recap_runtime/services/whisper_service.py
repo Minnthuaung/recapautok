@@ -227,6 +227,13 @@ class WhisperTimestampService:
         }
         if self.language:
             kwargs["language"] = self.language
+        if not str(self.model_size).endswith(".en"):
+            # Other languages (2026-10-17): the multilingual medium model on a Hindi recap wrote "ॉॉॉॉ…" and
+            # "पर पाइजावाद पर पाइजावाद …" over real speech (3 loops in 2 min). With beam search and Whisper's
+            # temperature fallback (a piece that loops is decoded again) the loops were gone, 36% more speech came
+            # back and the sentence marks (।) were written; English keeps the fast settings above.
+            kwargs["beam_size"] = 5
+            kwargs["temperature"] = (0.0, 0.2, 0.4, 0.6, 0.8)
 
         segments_iter, info = self._model.transcribe(media_path, **kwargs)
         segments: list[dict[str, Any]] = []

@@ -86,6 +86,23 @@ class SourceLanguageTests(unittest.TestCase):
                 self.assertRaisesRegex(RuntimeError, "already speaks Burmese"):
             b._detect_language(self.src, self.tmp)
 
+    def test_long_lines_without_marks_end_at_whisper_segments_for_other_languages(self):
+        words, t = [], 0.0
+        for seg in range(13):     # ten 2 s sentences ending in "।", then three 6 s Whisper segments without marks
+            n = 4 if seg < 10 else 12
+            ws = [{"text": f"शब्द{seg}{i}" + ("।" if seg < 10 and i == n - 1 else ""), "start": t + i * 0.5,
+                   "end": t + i * 0.5 + 0.45} for i in range(n)]
+            words.append({"id": seg, "start": t, "end": t + n * 0.5, "text": " ".join(w["text"] for w in ws),
+                          "words": ws})
+            t += n * 0.5
+        transcript = {"segments": words}
+        hindi = rp.atomicize_timestamp_segments(transcript, sentence_locked=True, segment_breaks=True)
+        english_rule = rp.atomicize_timestamp_segments(transcript, sentence_locked=True)
+        self.assertLessEqual(max(u["speech_end"] - u["speech_start"] for u in hindi), 12.5)
+        self.assertGreater(max(u["speech_end"] - u["speech_start"] for u in english_rule), 17.0)   # unchanged
+        build = (APP / "recap_planner.py").read_text(encoding="utf-8")
+        self.assertIn('segment_breaks=whisper_language != "en"', build)
+
     def test_the_ui_offers_auto_detect_and_the_languages(self):
         ui = (APP / "controller.py").read_text(encoding="utf-8")
         self.assertIn('LANGUAGE_LABELS = {"auto": "Auto-detect", **SOURCE_LANGUAGES}', ui)

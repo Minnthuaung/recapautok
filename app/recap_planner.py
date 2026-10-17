@@ -761,6 +761,7 @@ def atomicize_timestamp_segments(
     target_duration: float = 4.2,
     max_words: int = 24,
     sentence_locked: bool = False,
+    segment_breaks: bool = False,
 ) -> list[dict[str, Any]]:
     """Build V2-style local sync units from measured word timestamps.
 
@@ -815,6 +816,8 @@ def atomicize_timestamp_segments(
                 close_current("sentence")
             elif duration >= SENTENCE_UNIT_TARGET and _word_ends_soft_clause(text):
                 close_current("clause")
+            elif segment_breaks and index in segment_ends and duration >= SENTENCE_UNIT_BREATH:
+                close_current("segment")       # not English: Whisper left out a mark, its segment ended (2026-10-17)
             elif duration >= SENTENCE_UNIT_BREATH and next_gap >= 0.35:
                 close_current("pause")
             elif duration >= SENTENCE_UNIT_HARD:
@@ -1877,6 +1880,7 @@ class RecapPlanBuilder:
             max_duration=self.atomic_max_duration,
             target_duration=self.atomic_target_duration,
             sentence_locked=sentence_lines,
+            segment_breaks=whisper_language != "en",
         )
         units = _filter_local_whisper_artifact_units(units, transcript, log=self.log)
         if not units:
