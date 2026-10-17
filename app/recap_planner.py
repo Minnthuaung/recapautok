@@ -20,7 +20,7 @@ from typing import Any, Callable
 LogFn = Callable[[str], None]
 ProgressFn = Callable[[int, int, str], None]
 PLANNER_MODE = "timestamp_translation_en_to_mm_narrator_v1"
-TRANSLATION_DIRECTION = "en_to_mm"
+TRANSLATION_DIRECTION = "en_to_mm"   # an English video's direction; others are "<code>_to_mm" (2026-10-17)
 # Whole-sentence lines like VOXCPM recap (2026-10-12): a line ends at a sentence end (or a clause after 6.5 s,
 # a breath after 10 s, at most 24 s). The old 4-6 s lines cut 20-35% of sentences in two, and Gemini then told a
 # sentence whole in its first line and said it again (or slid every next line one early). A job started with
@@ -36,6 +36,28 @@ SENTENCE_UNIT_GAP = 1.5         # a pause this long always ends a line
 BOUNDARY_PROFILE = "v2_full_coverage_midpoint"
 WHISPER_MODEL = "small.en"
 WHISPER_LANGUAGE = "en"
+# Any source language (2026-10-17, user: "don't fix Whisper to English"): an English video keeps small.en (and
+# its old jobs keep their transcript and translation); any other language is heard by the multilingual medium
+# model (WHISPER_MODEL_OTHER; config.json "whisper_model_other": "small" is faster on a PC without an NVIDIA
+# GPU), and "Auto-detect" first asks the small multilingual base model which language the video speaks.
+WHISPER_MODEL_OTHER = "medium"
+WHISPER_DETECT_MODEL = "base"
+SOURCE_LANGUAGES = {
+    "en": "English", "zh": "Chinese", "hi": "Hindi", "ko": "Korean", "ja": "Japanese", "th": "Thai",
+    "vi": "Vietnamese", "id": "Indonesian", "ms": "Malay", "tl": "Filipino (Tagalog)", "es": "Spanish",
+    "pt": "Portuguese", "fr": "French", "de": "German", "it": "Italian", "ru": "Russian", "tr": "Turkish",
+    "ar": "Arabic", "bn": "Bengali", "ta": "Tamil", "te": "Telugu", "ur": "Urdu",
+}
+
+
+def source_language_name(code: str) -> str:
+    return SOURCE_LANGUAGES.get(str(code or "").strip().lower(), str(code or "the source language"))
+
+
+def whisper_choice(language: str, other_model: str = WHISPER_MODEL_OTHER) -> tuple[str, str]:
+    """(Whisper model, language code) for a known source language."""
+    code = str(language or "en").strip().lower()
+    return (WHISPER_MODEL, WHISPER_LANGUAGE) if code == "en" else (str(other_model or WHISPER_MODEL_OTHER), code)
 
 
 GEMINI_MODEL_FALLBACK_CHAIN = [
@@ -571,23 +593,23 @@ def _unit_is_low_information_repetition(unit: dict[str, Any]) -> bool:
     return False
 
 
-# Not English (2026-10-13, a user's second video): the English-only Whisper (small.en) does not stop on Hindi,
-# Chinese, … speech - it writes a few English phrases again and again ("I'm not going to do it." ×40, "We are all"
-# ×N) and most of the speech is lost, so the video came out with wrong narration. In English transcripts 0-0.1% of
-# the lines repeat one of the 5 before them; in two non-English videos 65% and 77% did.
-NOT_ENGLISH_REPEAT_SHARE = 0.25
-NOT_ENGLISH_MIN_LINES = 10
+# Whisper heard no real speech (2026-10-13, a user's second video): the English-only Whisper (small.en) does not
+# stop on Hindi, Chinese, … speech - it writes a few English phrases again and again ("I'm not going to do it." ×40,
+# "We are all" ×N) and most of the speech is lost. In real transcripts 0-0.1% of the lines repeat one of the 5
+# before them; in those two videos 65% and 77% did. Since 2026-10-17 the source language is detected (or chosen),
+# so this now means the wrong language was detected/chosen, or the video is mostly music or noise.
+REPEAT_STOP_SHARE = 0.25
+REPEAT_MIN_LINES = 10
 
 
 def _repeated_line_share(transcript: dict[str, Any]) -> tuple[float, int, list[tuple[str, int]]]:
-    """(share of lines of 3+ words that say the same as one of the 5 lines before them, lines counted,
-    the most repeated lines with their counts)."""
+    """(share of lines (3+ words, or 6+ letters in a language written without spaces) that say the same as one of
+    the 5 lines before them, lines counted, the most repeated lines with their counts)."""
     lines = []
     for seg in transcript.get("segments") or []:
         if isinstance(seg, dict):
-            text = re.sub(r"[^a-z0-9 ]", "", _clean(seg.get("text")).lower()).strip()
-            text = re.sub(r"\s+", " ", text)
-            if len(text.split()) >= 3:
+            text = re.sub(r"[\W_]+", " ", _clean(seg.get("text")).lower()).strip()
+            if len(text.split()) >= 3 or len(text.replace(" ", "")) >= 6:
                 lines.append(text)
     if not lines:
         return 0.0, 0, []
@@ -599,21 +621,20 @@ def _repeated_line_share(transcript: dict[str, Any]) -> tuple[float, int, list[t
     return repeated / len(lines), len(lines), top
 
 
-def _check_english_speech(transcript: dict[str, Any], transcript_name: str) -> None:
-    """Stop before any Gemini request when Whisper clearly did not hear English speech."""
+def _check_heard_speech(transcript: dict[str, Any], transcript_name: str, language_name: str = "English") -> None:
+    """Stop before any Gemini request when Whisper clearly did not hear speech in the language it listened for."""
     share, count, top = _repeated_line_share(transcript)
-    if count < NOT_ENGLISH_MIN_LINES or share < NOT_ENGLISH_REPEAT_SHARE:
+    if count < REPEAT_MIN_LINES or share < REPEAT_STOP_SHARE:
         return
     examples = ", ".join(f'"{text}" ×{n}' for text, n in top if n > 1)
     raise RuntimeError(
-        f"ဒီဗီဒီယိုမှာ English စကား မကြားရပါဘူး — Whisper transcript ရဲ့ စာကြောင်း {share:.0%} က "
+        f"Whisper က {language_name} စကားကို ကောင်းကောင်း မကြားရပါဘူး — transcript ရဲ့ စာကြောင်း {share:.0%} က "
         f"တူတူ ထပ်နေပါတယ် ({examples})။\n"
-        "ဒီ tool က English ပြောတဲ့ ဗီဒီယို → မြန်မာ အတွက်ပဲ ဖြစ်ပါတယ်။ တရုတ် / ဟိန္ဒီ / ကိုရီးယား စတဲ့ "
-        "တခြားဘာသာ ဗီဒီယိုဆိုရင် English Whisper က စကားကို မကြားဘဲ ဒီလို English စာကြောင်းတွေ ထပ်ခါထပ်ခါ ရေးပြီး "
-        "မြန်မာအသံ မှားထွက်ပါတယ်။\n"
-        f"English ဗီဒီယို ဖြစ်ရင် {transcript_name} ကို ဖွင့်စစ်ပါ (သီချင်း / နောက်ခံဆူညံသံ များနေတာ ဖြစ်နိုင်ပါတယ်)။\n"
-        f"Not English speech: {share:.0%} of the Whisper lines repeat ({examples}). "
-        "This tool is for English-speaking videos only."
+        f"ဗီဒီယိုက {language_name} မဟုတ်ရင် Source language မှာ မှန်တဲ့ ဘာသာကို ရွေးပြီး (သို့) Auto-detect နဲ့ "
+        "START ပြန်နှိပ်ပါ။\n"
+        f"ဘာသာ မှန်ပါလျက် ဒီ error တက်ရင် {transcript_name} ကို ဖွင့်စစ်ပါ (သီချင်း / နောက်ခံဆူညံသံ များနေတာ ဖြစ်နိုင်ပါတယ်)။\n"
+        f"Whisper ({language_name}) heard little real speech: {share:.0%} of its lines repeat ({examples}). "
+        "If the video is in another language, choose it in Source language (or Auto-detect) and start again."
     )
 
 
@@ -683,11 +704,11 @@ def _word_ends_sentence(text: str) -> bool:
     # standalone translation ID.
     if re.fullmatch(r"[a-z]\.['’\"”)]?", cleaned):
         return False
-    return bool(re.search(r"[.!?…။।॥。！？][\"'’”)]?$", cleaned))
+    return bool(re.search(r"[.!?…။।॥。！？۔؟][\"'’”)]?$", cleaned))
 
 
 def _word_ends_soft_clause(text: str) -> bool:
-    return bool(re.search(r"[;,:၊；，、][\"'’”)]?$", _clean(text)))
+    return bool(re.search(r"[;,:၊；，、،][\"'’”)]?$", _clean(text)))
 
 
 def _fallback_word_tokens(text: str, start: float, end: float, transcript_id: int) -> list[dict[str, Any]]:
@@ -756,6 +777,12 @@ def atomicize_timestamp_segments(
     target_duration = max(2.5, float(target_duration))
     max_duration = max(target_duration + 0.5, float(max_duration))
     min_natural_duration = min(1.8, target_duration * 0.4)
+    # Whisper writes few sentence marks in some languages (2026-10-17: a Hindi video heard as Urdu had none, and
+    # every line ran to 24 s). There, where Whisper ends one of its own segments - a pause - is a sentence end.
+    segment_ends = {i for i, tok in enumerate(tokens)
+                    if i + 1 == len(tokens) or tokens[i + 1]["source_transcript_id"] != tok["source_transcript_id"]}
+    spoken = (float(tokens[-1]["end"]) - float(tokens[0]["start"])) if tokens else 0.0
+    few_marks = sum(1 for tok in tokens if _word_ends_sentence(str(tok["text"]))) < spoken / 20.0
 
     def close_current(boundary: str) -> None:
         nonlocal current
@@ -784,7 +811,7 @@ def atomicize_timestamp_segments(
         if sentence_locked:
             if next_gap >= SENTENCE_UNIT_GAP:
                 close_current("pause")
-            elif _word_ends_sentence(text):
+            elif _word_ends_sentence(text) or (few_marks and index in segment_ends and duration >= 2.0):
                 close_current("sentence")
             elif duration >= SENTENCE_UNIT_TARGET and _word_ends_soft_clause(text):
                 close_current("clause")
@@ -1201,6 +1228,7 @@ def translate_batch(
     next_context: list[dict[str, Any]],
     log: LogFn,
     _split_depth: int = 0,
+    source_language: str = "English",
 ) -> list[dict[str, Any]]:
     task_rules = """
 You are a CONTEXT-AWARE BURMESE NARRATION TRANSLATOR.
@@ -1229,6 +1257,7 @@ HARD RULES:
 11. Write EVERY word in Burmese script — no English/Latin words (the Burmese voice cannot read them). Translate titles and terms; write names of people, places and techniques in Burmese letters by sound, with one spelling per name.
 12. A sentence often runs across two IDs. Each ID says only its own source words: never tell the next ID's part early, never say again what the previous ID already said.
 """
+    task_rules = task_rules.replace("the CURRENT English items", f"the CURRENT {source_language} items")
     prompt = f"""
 {task_rules}
 
@@ -1331,6 +1360,7 @@ CRITICAL OUTPUT ID PROTOCOL:
             next_context=left_next,
             log=log,
             _split_depth=_split_depth + 1,
+            source_language=source_language,
         )
         right_prev = (list(previous_context or []) + translated_left)[-context_limit:]
         translated_right = translate_batch(
@@ -1341,6 +1371,7 @@ CRITICAL OUTPUT ID PROTOCOL:
             next_context=list(next_context or []),
             log=log,
             _split_depth=_split_depth + 1,
+            source_language=source_language,
         )
         combined = translated_left + translated_right
         _assert_no_adjacent_translation_duplicates(combined, list(previous_context or []))
@@ -1577,7 +1608,8 @@ def _job_segmentation_profile(state_file: Path, translations_file: Path) -> str:
 
 
 class RecapPlanBuilder:
-    """English narrator video → timestamp-locked Burmese narration plan (narrator-only source)."""
+    """Narrator video in any language (English by small.en, others by the multilingual model) → timestamp-locked
+    Burmese narration plan (narrator-only source)."""
 
     def __init__(
         self,
@@ -1597,7 +1629,11 @@ class RecapPlanBuilder:
         atomic_target_duration: float = 4.2,
         gemini_request_timeout_seconds: int = 120,
         gemini_text_model: str = "gemini-3.5-flash",
+        source_language: str = "auto",
+        whisper_model_other: str = WHISPER_MODEL_OTHER,
     ):
+        self.source_language = str(source_language or "auto").strip().lower()
+        self.whisper_model_other = str(whisper_model_other or WHISPER_MODEL_OTHER).strip()
         self.runtime_root = Path(runtime_root).resolve()
         self.gemini_env_path = Path(gemini_env_path).expanduser().resolve() if str(gemini_env_path or "").strip() else None
         self.ffprobe = ffprobe_path
@@ -1640,12 +1676,73 @@ class RecapPlanBuilder:
             pass
         gc.collect()
 
+    def _detect_language(self, source: Path, job_dir: Path) -> str:
+        """Auto-detect: the multilingual base model listens to the first 8 minutes (speech only)."""
+        cache = job_dir / "language_detect.json"
+        stat = source.stat()
+        stamp = f"{source}|{stat.st_size}|{int(stat.st_mtime)}"
+        try:
+            saved = json.loads(cache.read_text(encoding="utf-8"))
+            if saved.get("source") == stamp and saved.get("language"):
+                self.log(f"🌐 Source language: {source_language_name(saved['language'])} (detected before)")
+                return str(saved["language"])
+        except Exception:
+            pass
+        self.log("🌐 Source language: Auto-detect — Whisper listens to the first minutes...")
+        sample = job_dir / "_language_sample_16k.wav"
+        subprocess.run([self.ffmpeg, "-y", "-v", "error", "-i", str(source), "-vn", "-ac", "1", "-ar", "16000",
+                        "-t", "480", str(sample)], check=True)
+        whisper_mod = _load_module("timestamp_whisper_service", self.runtime_root / "services" / "whisper_service.py")
+        runtime_cfg = _load_runtime_config(self.runtime_root)
+        detector = whisper_mod.WhisperTimestampService(
+            model_size=WHISPER_DETECT_MODEL,
+            backend="faster-whisper",
+            device=str(runtime_cfg.get("whisper_device", os.getenv("WHISPER_DEVICE", "cuda"))),
+            compute_type=str(runtime_cfg.get("whisper_compute_type", os.getenv("WHISPER_COMPUTE_TYPE", "float16"))),
+        )
+        try:
+            language, probability = detector.detect_language(str(sample))
+        finally:
+            self._release_whisper_gpu(detector)
+            sample.unlink(missing_ok=True)
+        self.log(f"🌐 Source language: {source_language_name(language)} ({language}, {probability:.0%} sure)"
+                 + ("" if probability >= 0.6 else " — not sure: if this is wrong, choose the language in Source language"))
+        if language == "ur":
+            # Spoken Hindi and Urdu are one language to Whisper's ear: a Hindi recap was "Urdu, 51% sure" and came
+            # out in Urdu letters without sentence marks. Auto-detect writes it as Hindi; choose Urdu to keep Urdu.
+            language = "hi"
+            self.log("🌐 Hindi / Urdu: written as Hindi (choose Urdu in Source language for Urdu letters)")
+        if language == "my":
+            raise RuntimeError("ဒီဗီဒီယိုက မြန်မာစကား ဖြစ်နေပါတယ် — မြန်မာ narration ပြန်လုပ်စရာ မလိုပါဘူး။ "
+                               "ဘာသာ မှားရင် Source language မှာ ရွေးပြီး START ပြန်နှိပ်ပါ။\n"
+                               "The video already speaks Burmese. If that is wrong, choose its language in Source language.")
+        _atomic_json(cache, {"source": stamp, "language": language, "probability": round(float(probability), 3)})
+        return language
+
+    def _pick_whisper(self, source: Path, job_dir: Path, transcript_file: Path, reuse: bool) -> tuple[str, str]:
+        """(model, language): a transcript this job already has decides (an old English job keeps its transcript
+        and translation), then the chosen language, then Auto-detect."""
+        choice = self.source_language
+        if reuse and transcript_file.is_file():
+            try:
+                saved = json.loads(transcript_file.read_text(encoding="utf-8"))
+                language, model = str(saved.get("language") or "").lower(), str(saved.get("model") or "")
+                if language and model and choice in ("auto", language):
+                    return model, language
+            except Exception:
+                pass
+        if choice != "auto":
+            return whisper_choice(choice, self.whisper_model_other)
+        return whisper_choice(self._detect_language(source, job_dir), self.whisper_model_other)
+
     def build(self, *, source: Path, job_dir: Path, source_title: str = "", reuse: bool = True) -> tuple[Path, dict[str, Any]]:
         self._validate_runtime()
         source = source.resolve()
         job_dir.mkdir(parents=True, exist_ok=True)
-        whisper_model, whisper_language = WHISPER_MODEL, WHISPER_LANGUAGE
         transcript_file = job_dir / "whisper_transcript.json"
+        whisper_model, whisper_language = self._pick_whisper(source, job_dir, transcript_file, reuse)
+        language_name = source_language_name(whisper_language)
+        direction = f"{whisper_language}_to_mm"          # "en_to_mm" as before for English
         transcript_text_file = job_dir / "whisper_transcript.txt"
         atomic_file = job_dir / "atomic_units.json"
         context_file = job_dir / "story_context.json"
@@ -1654,7 +1751,7 @@ class RecapPlanBuilder:
         plan_file = job_dir / "smart_sync_plan.json"
         state_file = job_dir / "planner_checkpoint.json"
         fp = _source_fingerprint_for_mode(
-            source, PLANNER_MODE + "|" + TRANSLATION_DIRECTION + f"|whisper:{whisper_model}:{whisper_language}")
+            source, PLANNER_MODE + "|" + direction + f"|whisper:{whisper_model}:{whisper_language}")
         segmentation_profile = _job_segmentation_profile(state_file, translations_file)
         sentence_lines = segmentation_profile == SEGMENTATION_PROFILE
 
@@ -1725,7 +1822,7 @@ class RecapPlanBuilder:
             )
         os.environ["GEMINI_API_KEY"] = key_pool[0][1]
         os.environ["GEMINI_TEXT_MODEL"] = self.gemini_text_model
-        self.log(f"🔑 Gemini key pool ready — {len(key_pool)} key(s) | translation only (English source uses local Whisper {whisper_model})")
+        self.log(f"🔑 Gemini key pool ready — {len(key_pool)} key(s) | translation only ({language_name} source uses local Whisper {whisper_model})")
 
         transcript = None
         if reuse and transcript_file.is_file() and state_file.is_file():
@@ -1749,7 +1846,7 @@ class RecapPlanBuilder:
             if self.should_stop():
                 raise InterruptedError("STOP requested before local Whisper")
             runtime_cfg = _load_runtime_config(self.runtime_root)
-            self.log(f"🌐 English → Myanmar | Local Whisper language={whisper_language} | model={whisper_model}")
+            self.log(f"🌐 {language_name} → Myanmar | Local Whisper language={whisper_language} | model={whisper_model}")
             self.progress(0, 4, "Whisper timestamp transcript")
             self.log("🎙️ [1/4] Local Whisper — full video timestamp transcript...")
             whisper = whisper_mod.WhisperTimestampService(
@@ -1771,7 +1868,7 @@ class RecapPlanBuilder:
             self.log(f"📝 Raw transcript: {transcript_text_file.name}")
             self._release_whisper_gpu(whisper)
 
-        _check_english_speech(transcript, transcript_text_file.name)   # before any Gemini request
+        _check_heard_speech(transcript, transcript_text_file.name, language_name)   # before any Gemini request
         self.log("✅ Narrator source: all transcript speech kept; original V2 Smart Sync boundaries")
         self.log("✂️ Lines: whole sentences (a line ends at a sentence end)" if sentence_lines else
                  "✂️ Lines: 4-6 s (this job was started that way; a new job uses whole sentences)")
@@ -1806,7 +1903,7 @@ class RecapPlanBuilder:
             "boundary_profile": BOUNDARY_PROFILE,
             "source_fingerprint": fp,
             "source_path": str(source),
-            "translation_direction": TRANSLATION_DIRECTION,
+            "translation_direction": direction,
             "transcript_backend": "faster-whisper",
             "transcript_ready": True,
             "plan_ready": False,
@@ -1845,7 +1942,7 @@ class RecapPlanBuilder:
             })
 
             self.progress(2, 4, "Timestamp translation")
-            self.log("🌐 [3/4] Gemini English → Myanmar translation — narrator source | V2 Smart Sync | no summary / no shortening...")
+            self.log(f"🌐 [3/4] Gemini {language_name} → Myanmar translation — narrator source | V2 Smart Sync | no summary / no shortening...")
             batches = _batch_by_size(units, max_items=self.translation_batch_max_items, max_chars=16000)
             translated_all: list[dict[str, Any]] = []
             if reuse and translations_file.is_file():
@@ -1930,6 +2027,7 @@ class RecapPlanBuilder:
                         current=batch,
                         next_context=nxt,
                         log=self.log,
+                        source_language=language_name,
                     )
                 except GeminiKeyPoolExhaustedError as exc:
                     saved = len(translated_all)
@@ -1961,7 +2059,7 @@ class RecapPlanBuilder:
                     "planner_mode": PLANNER_MODE,
                     "segmentation_profile": segmentation_profile,
                     "source_fingerprint": fp,
-                    "translation_direction": TRANSLATION_DIRECTION,
+                    "translation_direction": direction,
                     "completed": len(translated_all),
                     "total": len(units),
                     "items": translated_all,
@@ -1982,8 +2080,8 @@ class RecapPlanBuilder:
         plan["standalone_source_path"] = str(source)
         plan["segmentation_profile"] = segmentation_profile
         plan["boundary_profile"] = BOUNDARY_PROFILE
-        plan["translation_direction"] = TRANSLATION_DIRECTION
-        plan["source_language"] = "en"
+        plan["translation_direction"] = direction
+        plan["source_language"] = whisper_language
         plan["target_language"] = "mm"
         plan["translation_batch_count"] = len(batches)
         plan["atomic_unit_count"] = len(translated_all)
@@ -2015,7 +2113,7 @@ class RecapPlanBuilder:
             "boundary_profile": BOUNDARY_PROFILE,
             "source_fingerprint": fp,
             "source_path": str(source),
-            "translation_direction": TRANSLATION_DIRECTION,
+            "translation_direction": direction,
             "transcript_ready": True,
             "context_ready": True,
             "translation_ready": True,

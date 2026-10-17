@@ -1,6 +1,7 @@
-"""A video that is not in English (2026-10-13, a user's second video): the English-only Whisper wrote a few English
-phrases again and again ("I'm not going to do it." ×40) and the video came out with wrong narration. The job now
-stops before any Gemini request and says why."""
+"""Whisper heard no real speech (2026-10-13, a user's second video): the English-only Whisper wrote a few English
+phrases again and again ("I'm not going to do it." ×40) on a Hindi video and the narration came out wrong. The job
+stops before any Gemini request and says why. Since 2026-10-17 the source language is detected or chosen
+(test_source_language.py), so this now catches a wrong language choice or a video of music/noise."""
 import sys
 import unittest
 from pathlib import Path
@@ -40,24 +41,25 @@ def transcript(lines):
 class NotEnglishTests(unittest.TestCase):
     def test_a_hindi_video_stops_with_the_reason(self):
         with self.assertRaises(RuntimeError) as caught:
-            rp._check_english_speech(transcript(HINDI), "whisper_transcript.txt")
+            rp._check_heard_speech(transcript(HINDI), "whisper_transcript.txt")
         text = str(caught.exception)
-        self.assertIn("English စကား မကြားရပါဘူး", text)
+        self.assertIn("English စကားကို ကောင်းကောင်း မကြားရပါဘူး", text)
+        self.assertIn("Source language", text)
         self.assertIn('"i am not busy i am not busy i am not busy" ×13', text)
         self.assertIn("whisper_transcript.txt", text)
 
     def test_an_english_video_goes_on(self):
-        rp._check_english_speech(transcript(ENGLISH), "whisper_transcript.txt")
+        rp._check_heard_speech(transcript(ENGLISH), "whisper_transcript.txt")
         share, count, _top = rp._repeated_line_share(transcript(ENGLISH))
-        self.assertLess(share, rp.NOT_ENGLISH_REPEAT_SHARE)
+        self.assertLess(share, rp.REPEAT_STOP_SHARE)
         self.assertEqual(count, len(ENGLISH))
 
     def test_a_very_short_transcript_is_not_judged(self):
-        rp._check_english_speech(transcript(["We are all here together."] * 6), "whisper_transcript.txt")
+        rp._check_heard_speech(transcript(["We are all here together."] * 6), "whisper_transcript.txt")
 
     def test_the_check_runs_before_the_translation(self):
         source = (APP / "recap_planner.py").read_text(encoding="utf-8")
-        self.assertLess(source.index("_check_english_speech(transcript, transcript_text_file.name)"),
+        self.assertLess(source.index("_check_heard_speech(transcript, transcript_text_file.name, language_name)"),
                         source.index("units = atomicize_timestamp_segments("))
 
 

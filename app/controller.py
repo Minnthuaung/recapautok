@@ -19,6 +19,8 @@ from tkinter import filedialog, messagebox, ttk
 from core import FRAME_FILLS, OUTPUT_RATIOS, normalize_segments, output_canvas, probe_video_size
 from preview_tools import probe_duration as preview_probe_duration, extract_preview_frame, scale_logo_preview
 from narration_editor import NarrationEditor, failed_segment_from_error
+from splitter_tab import SplitterTab
+from recap_planner import SOURCE_LANGUAGES
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT_DIR / "config.json"
@@ -43,6 +45,8 @@ PREVIEW_H = 360
 
 EDGE_VOICES = ("my-MM-ThihaNeural", "my-MM-NilarNeural")
 FILL_LABELS = {"blur": "Blur background", "black": "Black bars", "crop": "Crop to fill"}
+# Source language (2026-10-17): any language → Myanmar; Auto-detect asks Whisper which language the video speaks.
+LANGUAGE_LABELS = {"auto": "Auto-detect", **SOURCE_LANGUAGES}
 
 
 def _tool_path(cfg: dict, name: str) -> str:
@@ -122,7 +126,7 @@ def _native_crash_message(code: int) -> str:
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Recap English → Myanmar — Narrator · Edge TTS · Smart Sync")
+        self.title("Recap → Myanmar — Narrator · Edge TTS · Smart Sync  |  Splitter")
         self.geometry("1580x900")
         self.minsize(1100, 660)
         try:
@@ -142,6 +146,9 @@ class App(tk.Tk):
         self.gemini_env = tk.StringVar(value=self.cfg.get("gemini_env_path") or str(ROOT_DIR / ".env"))
         self.source = tk.StringVar(value="")
         self.source_title = tk.StringVar(value="")
+        saved_language = str(self.cfg.get("source_language") or "auto")
+        self.source_language = tk.StringVar(value=LANGUAGE_LABELS.get(saved_language, LANGUAGE_LABELS["auto"]))
+        self.final_folder = tk.StringVar(value=str(self.cfg.get("final_output_folder") or ""))
         saved_voice = str(self.cfg.get("edge_tts_voice_mm") or self.cfg.get("edge_tts_voice") or EDGE_VOICES[0])
         self.edge_voice = tk.StringVar(value=saved_voice if saved_voice in EDGE_VOICES else EDGE_VOICES[0])
         self.edge_rate_percent = tk.DoubleVar(value=float(_parse_edge_rate_percent(self.cfg.get("edge_tts_rate", "+0%"))))
@@ -226,6 +233,10 @@ class App(tk.Tk):
         style.configure("TCheckbutton", background=BG, foreground=FG)
         style.map("TCheckbutton", background=[("active", BG)], foreground=[("active", FG)])
         style.configure("Horizontal.TProgressbar", troughcolor=FIELD, background=ACCENT, bordercolor=FIELD, lightcolor=ACCENT, darkcolor=ACCENT)
+        style.configure("TNotebook", background=BG, borderwidth=0)
+        style.configure("TNotebook.Tab", background=PANEL, foreground=MUTED, padding=(14, 5), bordercolor=BORDER)
+        style.map("TNotebook.Tab", background=[("selected", "#252b36")], foreground=[("selected", FG)])
+        style.configure("Tools.TNotebook.Tab", font=("Segoe UI Semibold", 11), padding=(22, 7))
         self.option_add("*TCombobox*Listbox.background", FIELD)
         self.option_add("*TCombobox*Listbox.foreground", FG)
         self.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
@@ -235,7 +246,17 @@ class App(tk.Tk):
         # Layout V33: one-line header, compact source bar, then three resizable panes
         # (Settings+Logs | Preview | Tools). The preview follows its pane size and always
         # shows the whole 16:9 frame; the long settings list scrolls inside its own pane.
-        outer = ttk.Frame(self, padding=(12, 8, 12, 8))
+        # Tools as tabs (2026-10-17): Recap, Splitter; more tools get their own tab.
+        self.tools_tabs = ttk.Notebook(self, style="Tools.TNotebook")
+        self.tools_tabs.pack(fill="both", expand=True)
+        recap_tab = ttk.Frame(self.tools_tabs)
+        self.tools_tabs.add(recap_tab, text="Recap")
+        self.splitter_tab = SplitterTab(self.tools_tabs, cfg=self.cfg, save=lambda: save_config(self.cfg),
+                                        tool=lambda name: _tool_path(self.cfg, name), logs_dir=LOGS_DIR)
+        self.tools_tabs.add(self.splitter_tab, text="Splitter")
+        if self.cfg.get("last_tool_tab") == "splitter":
+            self.tools_tabs.select(self.splitter_tab)
+        outer = ttk.Frame(recap_tab, padding=(12, 8, 12, 8))
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(2, weight=1)
@@ -243,7 +264,7 @@ class App(tk.Tk):
         header = tk.Frame(outer, bg=BG)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         tk.Label(header, text="Recap Production", bg=BG, fg=FG, font=("Segoe UI Semibold", 15)).pack(side="left")
-        tk.Label(header, text="English → Myanmar  |  Narrator only  |  Whisper + Gemini  |  Edge TTS  |  Smart Sync",
+        tk.Label(header, text="Any language → Myanmar  |  Narrator only  |  Whisper + Gemini  |  Edge TTS  |  Smart Sync",
                  bg=BG, fg=MUTED, font=("Segoe UI", 9)).pack(side="left", padx=(14, 0), pady=(5, 0))
 
         source_bar = ttk.Frame(outer)
@@ -261,6 +282,12 @@ class App(tk.Tk):
         ttk.Label(source_bar, text="Gemini .env").grid(row=0, column=3, sticky="w", padx=(0, 8))
         ttk.Entry(source_bar, textvariable=self.gemini_env).grid(row=0, column=4, sticky="ew")
         ttk.Button(source_bar, text="Browse", style="Compact.TButton", command=self._browse_env).grid(row=0, column=5, padx=(6, 0))
+        ttk.Label(source_bar, text="Save final to").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(6, 0))
+        ttk.Entry(source_bar, textvariable=self.final_folder).grid(row=1, column=1, sticky="ew", pady=(6, 0))
+        ttk.Button(source_bar, text="Browse", style="Compact.TButton", command=self._browse_final_folder).grid(
+            row=1, column=2, padx=(6, 18), pady=(6, 0), sticky="w")
+        ttk.Label(source_bar, text="ဗလာထားရင် job folder ထဲမှာပဲ။ ရွေးထားရင် ပြီးတဲ့ video ကို <name>_Myanmar.mp4 နဲ့ ဒီ folder ထဲ ထည့်ပေးမယ်။",
+                  style="Muted.TLabel").grid(row=1, column=3, columnspan=3, sticky="w", pady=(6, 0))
 
         main = ttk.PanedWindow(outer, orient="horizontal")
         main.grid(row=2, column=0, sticky="nsew")
@@ -288,9 +315,13 @@ class App(tk.Tk):
             label.grid(row=row, column=2, sticky="w", padx=(8, 0))
             return label
 
-        ttk.Label(source_box, text="Direction").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Label(source_box, text="English → Myanmar  ·  Narrator only  ·  Edge TTS").grid(
-            row=1, column=1, columnspan=2, sticky="w", pady=3)
+        ttk.Label(source_box, text="Source language").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Combobox(source_box, textvariable=self.source_language, state="readonly",
+                     values=tuple(LANGUAGE_LABELS.values())).grid(row=1, column=1, sticky="ew", pady=3)
+        hint(1, "ဗီဒီယိုထဲက ပြောတဲ့ ဘာသာ။ Auto-detect = Whisper က နားထောင်ပြီး သိအောင်လုပ်မယ်")
+        ttk.Label(source_box, text="Output").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Label(source_box, text="Myanmar  ·  Narrator only  ·  Edge TTS").grid(
+            row=2, column=1, columnspan=2, sticky="w", pady=3)
 
         self.edge_voice_label = ttk.Label(source_box, text="Edge TTS Voice")
         self.edge_voice_label.grid(row=11, column=0, sticky="w", padx=(0, 8), pady=3)
@@ -549,6 +580,12 @@ class App(tk.Tk):
 
     def _on_close(self) -> None:
         self._save_pane_layout()
+        self.splitter_tab.shutdown()
+        try:
+            self.cfg["last_tool_tab"] = "splitter" if self.tools_tabs.select() == str(self.splitter_tab) else "recap"
+            save_config(self.cfg)
+        except Exception:
+            pass
         self.destroy()
 
     def _voice_volume_changed(self, value) -> None:
@@ -922,6 +959,14 @@ class App(tk.Tk):
             pass
         self.after(150, self._pump)
 
+    def _browse_final_folder(self) -> None:
+        folder = filedialog.askdirectory(title="Save the finished videos in")
+        if folder:
+            self.final_folder.set(folder)
+
+    def _source_language_code(self) -> str:
+        return next((code for code, label in LANGUAGE_LABELS.items() if label == self.source_language.get()), "auto")
+
     def _browse_env(self) -> None:
         current = self.gemini_env.get().strip()
         initial = str(Path(current).parent) if current else str(ROOT_DIR.parent)
@@ -1009,6 +1054,8 @@ class App(tk.Tk):
 
     def _save_cfg(self, settings: dict) -> None:
         self.cfg["gemini_env_path"] = settings["gemini_env_path"]
+        self.cfg["source_language"] = settings["source_language"]
+        self.cfg["final_output_folder"] = settings["final_output_folder"]
         self.cfg["reuse_transcript_and_plan"] = settings["reuse_transcript_and_plan"]
         self.cfg["edge_tts_voice_mm"] = settings["edge_tts_voice"]
         self.cfg["edge_tts_rate"] = settings["edge_tts_rate"]
@@ -1079,8 +1126,16 @@ class App(tk.Tk):
         }
         if overlays["logo_path"] and not Path(overlays["logo_path"]).is_file():
             raise ValueError("Logo image path မမှန်ပါ။")
+        final_folder = self.final_folder.get().strip()
+        if final_folder:
+            try:
+                Path(final_folder).mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise ValueError(f"Save final to: folder ကို မဖန်တီးနိုင်ပါ ({exc})")
         return {
             "source": source,
+            "source_language": self._source_language_code(),
+            "final_output_folder": final_folder,
             "source_title": self.source_title.get().strip() or source.stem,
             "edge_tts_voice": voice,
             "edge_tts_rate": _format_edge_rate(self.edge_rate_percent.get()),
@@ -1188,7 +1243,7 @@ class App(tk.Tk):
         self.progress["value"] = 0
         self.status.set("STARTING")
         self.stage.set("Preparing")
-        self._log("📦 English → Myanmar · Narrator only · Edge TTS · V2 Smart Sync")
+        self._log(f"📦 {self.source_language.get()} → Myanmar · Narrator only · Edge TTS · V2 Smart Sync")
         self._log(f"📁 App root: {ROOT_DIR}")
         if batch:
             self._log(f"📂 Folder batch: {len(batch)} video(s) — one at a time")
@@ -1206,6 +1261,7 @@ class App(tk.Tk):
             "atomic_target_duration": float(self.cfg.get("atomic_target_duration", 4.2)),
             "gemini_request_timeout_seconds": int(self.cfg.get("gemini_request_timeout_seconds", 120)),
             "gemini_text_model": str(self.cfg.get("gemini_text_model", "gemini-3.5-flash")),
+            "whisper_model_other": str(self.cfg.get("whisper_model_other", "medium")),
         }
 
         def worker() -> None:
@@ -1306,6 +1362,8 @@ class App(tk.Tk):
             "ffprobe_path": ffprobe,
             "reuse": settings["reuse_transcript_and_plan"],
             "stop_file": str(stop_file),
+            "source_language": settings.get("source_language", "auto"),
+            "whisper_model_other": cfg_values.get("whisper_model_other", "medium"),
         }
         for key in (
             "translation_batch_max_items", "story_context_batch_max_items", "context_overlap",
@@ -1358,6 +1416,13 @@ class App(tk.Tk):
         })
         result = self._run_child("render_worker.py", render_cfg, "STEP 2 — Edge TTS + Smart Sync").get("result") or {}
         final = result.get("final") or result.get("audio") or str(job_dir)
+        folder = str(settings.get("final_output_folder") or "").strip()
+        if folder and Path(final).is_file():
+            target = Path(folder) / f"{source.stem}_Myanmar.mp4"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(final, target)
+            self._log(f"📤 Final video saved to {target}")
+            final = str(target)
         return str(final), job_dir
 
     def _stop(self) -> None:

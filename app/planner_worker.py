@@ -50,6 +50,8 @@ def main() -> int:
             atomic_target_duration=float(cfg.get("atomic_target_duration", 4.2)),
             gemini_request_timeout_seconds=int(cfg.get("gemini_request_timeout_seconds", 120)),
             gemini_text_model=str(cfg.get("gemini_text_model", "gemini-3.5-flash")),
+            source_language=str(cfg.get("source_language", "auto")),
+            whisper_model_other=str(cfg.get("whisper_model_other", "medium")),
         )
         plan_path, plan = planner.build(
             source=Path(cfg["source_path"]),

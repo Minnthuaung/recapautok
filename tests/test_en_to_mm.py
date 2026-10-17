@@ -1,4 +1,5 @@
-"""English → Myanmar narrator tool: only that direction is left, and the Smart Sync plan stays V2."""
+"""→ Myanmar narrator tool: the removed modes (VoxCPM, pyannote, mm_to_en, other targets) stay out, and the Smart
+Sync plan stays V2. Since 2026-10-17 the SOURCE may be any language (test_source_language.py)."""
 from __future__ import annotations
 
 import sys

@@ -43,7 +43,7 @@ class WhisperTimestampService:
         self._active_backend: Optional[str] = None
 
     def _download_model_once(self) -> None:
-        """First run on a PC: the model (~460 MB for small.en) comes from huggingface.co.
+        """First run on a PC: the model (~460 MB for small.en, ~1.5 GB for medium) comes from huggingface.co.
 
         faster-whisper downloads it with its progress bar switched off, so the log looked frozen
         after "You are sending unauthenticated requests to the HF Hub" (only a warning: no
@@ -66,8 +66,10 @@ class WhisperTimestampService:
         from huggingface_hub import constants
 
         folder = Path(constants.HF_HUB_CACHE) / ("models--" + repo.replace("/", "--"))
+        size = {"tiny": 75, "base": 145, "small": 465, "small.en": 465, "medium": 1530}.get(str(self.model_size))
         print(
-            f"⬇️ First run only: downloading the Whisper model '{self.model_size}' (~460 MB) from huggingface.co. "
+            f"⬇️ First run only: downloading the Whisper model '{self.model_size}'"
+            + (f" (~{size} MB)" if size else "") + " from huggingface.co. "
             "No account is needed — the HF_TOKEN warning can be ignored.",
             flush=True,
         )
@@ -177,6 +179,30 @@ class WhisperTimestampService:
             "install/config ကိုစစ်ပါ။"
         )
 
+    def detect_language(self, media_path: str) -> tuple[str, float]:
+        """Which language the speech in media_path is in: (Whisper code such as "en", "zh", "hi", probability).
+        Needs a multilingual model (not a ".en" one); music and silence are skipped (VAD), up to 8 pieces of 30 s."""
+        self._ensure_model()
+        if self._active_backend != "faster-whisper":
+            raise RuntimeError("Language detection needs faster-whisper")
+        from faster_whisper import decode_audio
+
+        audio = decode_audio(str(media_path), sampling_rate=16000)
+        try:
+            language, probability, _all = self._model.detect_language(
+                audio=audio, vad_filter=True, language_detection_segments=8)
+        except RuntimeError as exc:
+            text = str(exc).lower()
+            if self.device == "cpu" or not any(word in text for word in ("cublas", "cudnn", "cuda", ".dll")):
+                raise
+            print(f"⚠️ GPU Whisper failed ({exc}); using the CPU instead")
+            self._model = None
+            self.device, self.compute_type = "cpu", "int8"
+            self._ensure_model()
+            language, probability, _all = self._model.detect_language(
+                audio=audio, vad_filter=True, language_detection_segments=8)
+        return str(language), float(probability)
+
     @staticmethod
     def _clean_text(text: str) -> str:
         return " ".join((text or "").strip().split())
@@ -190,7 +216,7 @@ class WhisperTimestampService:
 
     def _transcribe_faster(self, media_path: str, vad_filter: bool = True, media_duration: Optional[float] = None) -> dict[str, Any]:
         # FAST-SYNC profile: keep word timestamps, but avoid expensive beam search.
-        # Language is explicitly supplied by the planner: English uses small.en/en.
+        # Language is supplied by the planner: English uses small.en/en, other languages the multilingual model.
         kwargs: dict[str, Any] = {
             "beam_size": 1,
             "best_of": 1,
