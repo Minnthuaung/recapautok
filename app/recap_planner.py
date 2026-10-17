@@ -69,6 +69,10 @@ GEMINI_MODEL_FALLBACK_CHAIN = [
 ]
 
 
+GEMINI_BUSY_ROUNDS = 5                    # every model 503: wait and start the chain again this many times
+GEMINI_BUSY_RETRY_FIRST_SECONDS = 300     # after a busy move, the first model is tried again this much later
+
+
 class GeminiKeyPoolExhaustedError(RuntimeError):
     """Every configured Gemini model/key fallback was exhausted."""
 
@@ -196,7 +200,38 @@ def _configure_gemini_key_pool(
         return True
 
     def advance_after_key_pool() -> bool:
+        busy["left_first_at"] = None      # a quota move is for good: no going back to the first model
         return advance_model("key pool exhausted")
+
+    # 503 "high demand" (2026-10-17, users of the shared tool): one busy moment moved the job down the chain for
+    # good, and a 503 on the last model stopped the whole job. Now every model busy -> wait (30 s, doubling, at
+    # most 5 min) and start again from the first model, up to BUSY_ROUNDS times; and 5 minutes after a busy
+    # move the next request tries the first model again.
+    busy: dict[str, Any] = {"rounds": 0, "left_first_at": None, "first_key": 0}
+
+    def advance_on_busy(reason: str = "503/high-demand/timeout") -> bool:
+        if model_index == 0:
+            busy["left_first_at"], busy["first_key"] = time.time(), key_index
+        if advance_model(reason):
+            return True
+        busy["rounds"] += 1
+        if busy["rounds"] > GEMINI_BUSY_ROUNDS:
+            return False
+        wait = min(300, 30 * 2 ** (busy["rounds"] - 1))
+        log(f"⏳ Every Gemini model is busy (503) — waiting {wait} s, then trying again from {models[0]} "
+            f"(round {busy['rounds']}/{GEMINI_BUSY_ROUNDS})")
+        time.sleep(wait)
+        activate(0, busy["first_key"], reason="busy models: start again")
+        busy["left_first_at"] = None
+        return True
+
+    def back_to_first_model() -> None:
+        left = busy["left_first_at"]
+        if left is not None and model_index > 0 and time.time() - left >= GEMINI_BUSY_RETRY_FIRST_SECONDS:
+            busy["left_first_at"] = None
+            activate(0, busy["first_key"], reason=f"{models[0]} may be free again")
+
+    ai._recap_back_to_first_model = back_to_first_model
 
     ai._recap_active_key_label = key_pool[0][0]
     ai._recap_active_model = models[0]
@@ -204,7 +239,7 @@ def _configure_gemini_key_pool(
     ai._recap_model_pool_size = len(models)
     ai._recap_model_chain = list(models)
     ai._recap_rotate_gemini_key = rotate_key
-    ai._recap_advance_gemini_model = advance_model
+    ai._recap_advance_gemini_model = advance_on_busy
     ai._recap_advance_after_key_pool = advance_after_key_pool
     log(f"🔑 Gemini key pool ready — {len(key_pool)} key(s); active: {key_pool[0][0]}")
     log("🤖 Gemini fallback chain: " + " → ".join(models))
@@ -1003,6 +1038,9 @@ def _gemini_json(ai: Any, prompt: str, *, retries: int = 3, log: LogFn | None = 
     """
     last: Exception | None = None
     attempt = 1
+    back = getattr(ai, "_recap_back_to_first_model", None)
+    if callable(back):
+        back()
     while attempt <= retries:
         try:
             ai._enable_proxy()
